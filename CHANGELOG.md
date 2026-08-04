@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [0.1.1] — 2026-08-04
+
+### Fixed
+
+- `claude-waker list | head` no longer prints `printf: write error: Broken
+  pipe`. Trapping SIGPIPE was not enough — bash's `printf` builtin reports the
+  EPIPE itself before the trap runs — so output now goes through a small
+  wrapper that exits quietly when the reader closes the pipe.
+
 ## [0.1.0] — 2026-08-04
 
 First release. Grew out of a hardcoded `for i in {1..16}` shell loop that sent
