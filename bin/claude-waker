@@ -7,7 +7,7 @@
 
 set -uo pipefail
 
-CW_VERSION="0.1.1"
+CW_VERSION="0.1.2"
 CW_PROG="${0##*/}"
 
 # ---------------------------------------------------------------------------
@@ -960,14 +960,27 @@ ITERM_SCRIPTS_DIR="$HOME/Library/Application Support/iTerm2/Scripts"
 
 cmd_install_plugin() {
   local dest="$ITERM_SCRIPTS_DIR/Claude Waker.py"
-  local self_dir bundled
+  local self_dir bundled=""
+
   self_dir=$(cd "$(dirname "$0")" && pwd)
-  bundled="$self_dir/../iterm2/Claude Waker.py"
+
+  # A git checkout keeps it next to bin/; Homebrew installs it under pkgshare,
+  # reachable as bin/../share/claude-waker whether run through the linked
+  # /opt/homebrew/bin symlink or straight out of the Cellar.
+  local candidate
+  for candidate in \
+    "$self_dir/../iterm2/Claude Waker.py" \
+    "$self_dir/../share/claude-waker/iterm2/Claude Waker.py" \
+    "$self_dir/../share/claude-waker/Claude Waker.py"
+  do
+    if [ -r "$candidate" ]; then bundled="$candidate"; break; fi
+  done
 
   mkdir -p "$ITERM_SCRIPTS_DIR" || die 1 "could not create $ITERM_SCRIPTS_DIR"
 
-  if [ -r "$bundled" ]; then
+  if [ -n "$bundled" ]; then
     cp "$bundled" "$dest" || die 1 "could not write $dest"
+    vsay "copied from $bundled"
   else
     cat >"$dest" <<'PYEOF' || die 1 "could not write $dest"
 #!/usr/bin/env python3

@@ -501,6 +501,47 @@ test_no_hangs() {
     -n 5 -e 45m --deadline 2s --no-countdown
 }
 
+test_install_plugin() {
+  local home="$SANDBOX/home"
+  local dest="$home/Library/Application Support/iTerm2/Scripts/Claude Waker.py"
+  mkdir -p "$home"
+
+  it "install-plugin: writes the entry"
+  HOME="$home" waker install-plugin >/dev/null 2>&1
+  [ -f "$dest" ] && ok || no "no file at $dest"
+
+  it "install-plugin: uses the repo's bundled copy, not the fallback"
+  if cmp -s "$ROOT/iterm2/Claude Waker.py" "$dest"; then ok; else
+    no "installed copy differs from iterm2/Claude Waker.py"
+  fi
+
+  # Homebrew lays the file out as bin/../share/claude-waker/iterm2/...
+  it "install-plugin: finds the Homebrew pkgshare layout"
+  local prefix="$SANDBOX/brew"
+  mkdir -p "$prefix/bin" "$prefix/share/claude-waker/iterm2"
+  cp "$WAKER" "$prefix/bin/claude-waker"
+  printf '# homebrew copy\n' > "$prefix/share/claude-waker/iterm2/Claude Waker.py"
+  rm -f "$dest"
+  HOME="$home" "$prefix/bin/claude-waker" --no-config --no-color install-plugin >/dev/null 2>&1
+  if grep -q '# homebrew copy' "$dest" 2>/dev/null; then ok; else
+    no "did not pick up the pkgshare copy"
+  fi
+
+  it "install-plugin: falls back when nothing is bundled"
+  local bare="$SANDBOX/bare"
+  mkdir -p "$bare/bin"
+  cp "$WAKER" "$bare/bin/claude-waker"
+  rm -f "$dest"
+  HOME="$home" "$bare/bin/claude-waker" --no-config --no-color install-plugin >/dev/null 2>&1
+  if grep -q 'iterm2.run_until_complete' "$dest" 2>/dev/null; then ok; else
+    no "fallback script missing or malformed"
+  fi
+
+  it "install-plugin: fallback is valid python"
+  python3 -m py_compile "$dest" 2>/dev/null && ok || no "fallback does not compile"
+  rm -rf "$SANDBOX/__pycache__"
+}
+
 test_flag_order() {
   local out
   out=$(waker list)
@@ -533,6 +574,7 @@ run_test "sending"          test_sending
 run_test "quoting"          test_quoting
 run_test "cli surface"      test_cli_surface
 run_test "no hangs"         test_no_hangs
+run_test "install plugin"   test_install_plugin
 run_test "flag order"       test_flag_order
 run_test "iterm absent"     test_iterm_absent
 

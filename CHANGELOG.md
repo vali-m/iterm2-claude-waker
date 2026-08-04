@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [0.1.2] — 2026-08-04
+
+### Fixed
+
+- `install-plugin` now finds the bundled `Claude Waker.py` when installed via
+  Homebrew. It only looked for `bin/../iterm2/`, which exists in a git checkout
+  but not in a Homebrew prefix, where the formula puts the file under
+  `share/claude-waker/`. Brew users silently got the smaller inline fallback
+  instead of the maintained copy.
+
 ## [0.1.1] — 2026-08-04
 
 ### Fixed
