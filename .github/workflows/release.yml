@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha256: ${{ steps.meta.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # The version in the script must match the tag.
+          IN_SCRIPT=$(sed -n 's/^CW_VERSION="\(.*\)"$/\1/p' bin/claude-waker)
+          if [ "$IN_SCRIPT" != "$VERSION" ]; then
+            echo "::error::CW_VERSION is $IN_SCRIPT but the tag says $VERSION"
+            exit 1
+          fi
+
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$URL" -o release.tar.gz
+          SHA=$(shasum -a 256 release.tar.gz | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "tarball sha256: $SHA"
+
+      - name: Test before publishing
+        run: /bin/bash ./test/run.sh
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --title "claude-waker ${{ steps.meta.outputs.version }}" \
+            --generate-notes \
+            --verify-tag || echo "release already exists"
+
+      - name: Formula stanza for the tap
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Tap formula update
+
+          In \`vali-m/homebrew-tap\`, set \`Formula/claude-waker.rb\` to:
+
+          \`\`\`ruby
+            url "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${{ steps.meta.outputs.tag }}.tar.gz"
+            sha256 "${{ steps.meta.outputs.sha256 }}"
+          \`\`\`
+          EOF
+
+  bump-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    # Needs a PAT with contents+pull_request scope on the tap repo, stored as
+    # TAP_TOKEN. Without it this job is skipped and the stanza above is applied
+    # by hand — see RELEASING.md.
+    if: ${{ github.repository_owner == 'vali-m' }}
+    steps:
+      - name: Check for a tap token
+        id: gate
+        run: |
+          if [ -n "${{ secrets.TAP_TOKEN }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "TAP_TOKEN not set — update the tap by hand (see RELEASING.md)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          repository: vali-m/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Bump the formula
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: tap
+        run: |
+          V="${{ needs.release.outputs.version }}"
+          SHA="${{ needs.release.outputs.sha256 }}"
+          F=Formula/claude-waker.rb
+          sed -i "s|archive/refs/tags/v.*\.tar\.gz|archive/refs/tags/v${V}.tar.gz|" "$F"
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" "$F"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "claude-waker-${V}"
+          git commit -am "claude-waker ${V}"
+          git push -u origin "claude-waker-${V}"
+
+      - name: Open the PR
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: gh pr create --fill --title "claude-waker ${{ needs.release.outputs.version }}"

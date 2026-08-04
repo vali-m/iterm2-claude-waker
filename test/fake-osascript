@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Test double for osascript. Dispatches on the AppleScript source it is handed
+# so the whole send path can be exercised without iTerm2.
+#
+#   CW_TEST_SESSIONS  raw session records to return for a list query
+#   CW_TEST_LOG       file to append a tab-separated record of each send to
+#   CW_TEST_SEND_MAP  optional "id=status" pairs (default: everything "sent")
+#   CW_TEST_RUNNING   "false" to report iTerm2 as not running
+
+set -u
+
+FS=$'\037'
+RS=$'\036'
+
+if [ "${1:-}" = "-e" ]; then
+  case "${2:-}" in
+    *"is running"*) printf '%s\n' "${CW_TEST_RUNNING:-true}" ;;
+  esac
+  exit 0
+fi
+
+# Script arrives on stdin; remaining argv are the AppleScript `on run argv` args.
+script=$(cat)
+[ "${1:-}" = "-" ] && shift
+
+case "$script" in
+  *"display notification"*)
+    [ -n "${CW_TEST_LOG:-}" ] && printf 'NOTIFY\t%s\n' "${1:-}" >>"$CW_TEST_LOG"
+    exit 0
+    ;;
+  *"write text"*)
+    msg="${1:-}"; nl="${2:-}"; esc="${3:-}"; idle="${4:-}"; prompt="${5:-}"
+    shift 5 2>/dev/null || shift $#
+    if [ -n "${CW_TEST_LOG:-}" ]; then
+      printf 'SEND\tmsg=%s\tnl=%s\tesc=%s\tidle=%s\tprompt=%s\tids=%s\n' \
+        "$msg" "$nl" "$esc" "$idle" "$prompt" "$*" >>"$CW_TEST_LOG"
+    fi
+    for id in "$@"; do
+      status="sent"
+      for pair in ${CW_TEST_SEND_MAP:-}; do
+        case "$pair" in
+          "$id="*) status="${pair#*=}" ;;
+        esac
+      done
+      printf '%s%s%s%s%s%s' "$id" "$FS" "name-of-$id" "$FS" "$status" "$RS"
+    done
+    exit 0
+    ;;
+  *)
+    printf '%s' "${CW_TEST_SESSIONS:-}"
+    exit 0
+    ;;
+esac

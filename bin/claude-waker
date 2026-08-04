@@ -1,0 +1,1434 @@
+#!/usr/bin/env bash
+#
+# claude-waker — keep Claude Code sessions in iTerm2 awake on a schedule.
+#
+# Single file, zero dependencies, macOS bash 3.2 compatible.
+# https://github.com/vali-m/iterm2-claude-waker
+
+set -uo pipefail
+
+CW_VERSION="0.1.0"
+CW_PROG="${0##*/}"
+
+# ---------------------------------------------------------------------------
+# Defaults (these reproduce the original shell loop)
+# ---------------------------------------------------------------------------
+
+DEF_MATCH="dev3"
+DEF_TEXT="continue"
+DEF_COUNT=16
+DEF_EVERY="45m"
+
+OPT_MATCH="$DEF_MATCH"
+OPT_MATCH_MODE="contains"
+OPT_IGNORE_CASE=0
+OPT_TEXT="$DEF_TEXT"
+OPT_COUNT="$DEF_COUNT"
+OPT_EVERY="$DEF_EVERY"
+OPT_JITTER=""
+OPT_DELAY=""
+OPT_AT=""
+OPT_UNTIL=""
+OPT_DEADLINE=""
+OPT_ALL=0
+OPT_FIRST=0
+OPT_NEWLINE=1
+OPT_ESC_FIRST=0
+OPT_IF_IDLE=0
+OPT_IF_PROMPT=0
+OPT_STOP_IF_GONE=0
+OPT_REQUIRE_MATCH=0
+OPT_MAX_TARGETS=0
+OPT_DRY_RUN=0
+OPT_QUIET=0
+OPT_VERBOSE=0
+OPT_LOG=""
+OPT_NOTIFY=0
+OPT_COUNTDOWN=-1        # -1 = auto (on when TTY)
+OPT_COLOR=-1            # -1 = auto (on when TTY)
+OPT_LEGACY=0
+OPT_YES=0
+OPT_PROFILE=""
+OPT_PRINT_CMD=0
+OPT_FORCE_MENU=0
+OPT_CONFIG=""
+OPT_NO_CONFIG=0
+
+SESSION_IDS=()
+TTY_FILTERS=()
+EXCLUDES=()
+TEXTS=()
+
+SAW_ARGS=0
+
+# Runtime state
+SENT_TOTAL=0
+CURSOR_HIDDEN=0
+
+# Field/record separators used to talk to AppleScript. Chosen because they
+# cannot appear in an iTerm2 session name.
+FS=$'\037'
+RS=$'\036'
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+C_RESET=""; C_DIM=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""
+
+setup_color() {
+  local on=0
+  if [ "$OPT_COLOR" -eq 1 ]; then
+    on=1
+  elif [ "$OPT_COLOR" -eq -1 ] && [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
+    on=1
+  fi
+  if [ "$on" -eq 1 ]; then
+    C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+    C_CYAN=$'\033[36m'
+  fi
+}
+
+say()  { [ "$OPT_QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+vsay() { [ "$OPT_VERBOSE" -eq 1 ] && printf '%s%s%s\n' "$C_DIM" "$*" "$C_RESET"; return 0; }
+warn() { printf '%s%s:%s %s\n' "$C_YELLOW" "$CW_PROG" "$C_RESET" "$*" >&2; }
+err()  { printf '%s%s:%s %s\n' "$C_RED" "$CW_PROG" "$C_RESET" "$*" >&2; }
+
+die() { local code="$1"; shift; err "$*"; exit "$code"; }
+
+logline() {
+  [ -n "$OPT_LOG" ] || return 0
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$OPT_LOG" 2>/dev/null
+}
+
+notify() {
+  [ "$OPT_NOTIFY" -eq 1 ] || return 0
+  osascript - "$1" "$2" >/dev/null 2>&1 <<'APPLESCRIPT'
+on run argv
+  display notification (item 2 of argv) with title (item 1 of argv)
+end run
+APPLESCRIPT
+}
+
+hide_cursor() { [ -t 1 ] && { printf '\033[?25l'; CURSOR_HIDDEN=1; }; return 0; }
+show_cursor() { [ "$CURSOR_HIDDEN" -eq 1 ] && { printf '\033[?25h'; CURSOR_HIDDEN=0; }; return 0; }
+
+cleanup() {
+  show_cursor
+  [ -t 1 ] && printf '\r\033[K'
+  return 0
+}
+
+on_interrupt() {
+  cleanup
+  printf '\n'
+  say "${C_DIM}Stopped after ${SENT_TOTAL} wake$( [ "$SENT_TOTAL" -eq 1 ] || printf s ).${C_RESET}"
+  logline "interrupted after ${SENT_TOTAL} wakes"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Duration parsing / formatting
+# ---------------------------------------------------------------------------
+
+# parse_duration "45m" -> 2700 ; accepts 2700, 90s, 45m, 1h30m, 2d
+parse_duration() {
+  local in="$1" total=0 num unit rest
+  [ -n "$in" ] || return 1
+  case "$in" in *[!0-9smhdSMHD]*) return 1 ;; esac
+  case "$in" in
+    *[!0-9]*) ;;
+    *) printf '%s\n' "$((10#$in))"; return 0 ;;
+  esac
+  rest="$in"
+  while [ -n "$rest" ]; do
+    num="${rest%%[!0-9]*}"
+    [ -n "$num" ] || return 1
+    rest="${rest#"$num"}"
+    unit="${rest:0:1}"
+    rest="${rest:1}"
+    case "$unit" in
+      s|S) total=$(( total + 10#$num )) ;;
+      m|M) total=$(( total + 10#$num * 60 )) ;;
+      h|H) total=$(( total + 10#$num * 3600 )) ;;
+      d|D) total=$(( total + 10#$num * 86400 )) ;;
+      *) return 1 ;;
+    esac
+  done
+  printf '%s\n' "$total"
+}
+
+# fmt_duration 40500 -> "11h15m"
+fmt_duration() {
+  local s="$1" d h m out=""
+  d=$(( s / 86400 )); s=$(( s % 86400 ))
+  h=$(( s / 3600 ));  s=$(( s % 3600 ))
+  m=$(( s / 60 ));    s=$(( s % 60 ))
+  [ "$d" -gt 0 ] && out="${out}${d}d"
+  [ "$h" -gt 0 ] && out="${out}${h}h"
+  [ "$m" -gt 0 ] && out="${out}${m}m"
+  [ "$s" -gt 0 ] && out="${out}${s}s"
+  [ -n "$out" ] || out="0s"
+  printf '%s\n' "$out"
+}
+
+# fmt_clock 2678 -> "44:38" ; 3725 -> "1:02:05"
+fmt_clock() {
+  local s="$1" h m
+  h=$(( s / 3600 )); s=$(( s % 3600 ))
+  m=$(( s / 60 ));   s=$(( s % 60 ))
+  if [ "$h" -gt 0 ]; then
+    printf '%d:%02d:%02d\n' "$h" "$m" "$s"
+  else
+    printf '%d:%02d\n' "$m" "$s"
+  fi
+}
+
+# seconds_until_clock "14:30" -> seconds until the next occurrence of 14:30
+seconds_until_clock() {
+  local hhmm="$1" h m now target
+  case "$hhmm" in
+    [0-9]:[0-9][0-9]|[0-9][0-9]:[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  h="${hhmm%%:*}"; m="${hhmm##*:}"
+  [ "$((10#$h))" -le 23 ] || return 1
+  [ "$((10#$m))" -le 59 ] || return 1
+  now=$(date +%s)
+  target=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%Y-%m-%d) $(printf '%02d:%02d' "$((10#$h))" "$((10#$m))"):00" +%s 2>/dev/null) || return 1
+  [ "$target" -le "$now" ] && target=$(( target + 86400 ))
+  printf '%s\n' "$(( target - now ))"
+}
+
+# rand_below <n> -> a random integer in [0, n)
+#
+# Deliberately not $RANDOM: apply_jitter is called from a command substitution,
+# and bash re-seeds $RANDOM identically in every subshell forked from the same
+# parent state, so $RANDOM would hand back the same number on every wake.
+rand_below() {
+  local n="$1" v
+  [ "$n" -gt 0 ] || { printf '0\n'; return 0; }
+  v=$(od -An -N4 -tu4 </dev/urandom 2>/dev/null | tr -d ' [:space:]')
+  case "$v" in
+    ''|*[!0-9]*) v="$RANDOM" ;;
+  esac
+  printf '%s\n' "$(( v % n ))"
+}
+
+# apply_jitter <seconds> -> seconds +/- jitter
+apply_jitter() {
+  local base="$1" j span delta
+  [ -n "$OPT_JITTER" ] || { printf '%s\n' "$base"; return 0; }
+  case "$OPT_JITTER" in
+    *%) j="${OPT_JITTER%\%}"; span=$(( base * 10#$j / 100 )) ;;
+    *)  span=$(parse_duration "$OPT_JITTER") || { printf '%s\n' "$base"; return 0; } ;;
+  esac
+  [ "$span" -gt 0 ] || { printf '%s\n' "$base"; return 0; }
+  delta=$(( $(rand_below $(( span * 2 + 1 ))) - span ))
+  base=$(( base + delta ))
+  [ "$base" -lt 1 ] && base=1
+  printf '%s\n' "$base"
+}
+
+# ---------------------------------------------------------------------------
+# iTerm2 bridge
+# ---------------------------------------------------------------------------
+
+iterm_running() {
+  local r
+  r=$(osascript -e 'application "iTerm" is running' 2>/dev/null)
+  [ "$r" = "true" ]
+}
+
+require_iterm() {
+  iterm_running || die 3 "iTerm2 is not running. Start it first (this tool will not launch it for you)."
+}
+
+# Emits one record per session: id FS name FS tty FS busy FS atprompt RS
+as_list_sessions() {
+  osascript - <<'APPLESCRIPT'
+on run argv
+  set fs to character id 31
+  set rs to character id 30
+  set out to ""
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set sId to (id of s) as text
+          set sName to (name of s) as text
+          try
+            set sTty to (tty of s) as text
+          on error
+            set sTty to "?"
+          end try
+          set busy to false
+          try
+            set busy to (is processing of s)
+          end try
+          set atp to false
+          try
+            set atp to (is at shell prompt of s)
+          end try
+          set out to out & sId & fs & sName & fs & sTty & fs & (busy as text) & fs & (atp as text) & rs
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return out
+end run
+APPLESCRIPT
+}
+
+# as_send <msg> <newline 0|1> <esc 0|1> <idle-only 0|1> <prompt-only 0|1> <id...>
+# Emits: id FS name FS status RS   (status: sent | skipped-busy | skipped-noprompt)
+as_send() {
+  osascript - "$@" <<'APPLESCRIPT'
+on run argv
+  set fs to character id 31
+  set rs to character id 30
+  set msg to item 1 of argv
+  set doNewline to ((item 2 of argv) is "1")
+  set doEsc to ((item 3 of argv) is "1")
+  set idleOnly to ((item 4 of argv) is "1")
+  set promptOnly to ((item 5 of argv) is "1")
+  set wanted to {}
+  repeat with i from 6 to (count of argv)
+    set end of wanted to (item i of argv)
+  end repeat
+  set out to ""
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set sId to (id of s) as text
+          if wanted contains sId then
+            set sName to (name of s) as text
+            set busy to false
+            try
+              set busy to (is processing of s)
+            end try
+            set atp to true
+            if promptOnly then
+              set atp to false
+              try
+                set atp to (is at shell prompt of s)
+              end try
+            end if
+            if idleOnly and busy then
+              set out to out & sId & fs & sName & fs & "skipped-busy" & rs
+            else if promptOnly and (not atp) then
+              set out to out & sId & fs & sName & fs & "skipped-noprompt" & rs
+            else
+              if doEsc then
+                tell s to write text (character id 27) newline NO
+              end if
+              if doNewline then
+                tell s to write text msg
+              else
+                tell s to write text msg newline NO
+              end if
+              set out to out & sId & fs & sName & fs & "sent" & rs
+            end if
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return out
+end run
+APPLESCRIPT
+}
+
+# ---------------------------------------------------------------------------
+# Session discovery / matching
+# ---------------------------------------------------------------------------
+
+# Populated by load_sessions()
+S_IDS=(); S_NAMES=(); S_TTYS=(); S_BUSY=(); S_PROMPT=()
+
+load_sessions() {
+  local raw rec id name tty busy atp
+  S_IDS=(); S_NAMES=(); S_TTYS=(); S_BUSY=(); S_PROMPT=()
+  raw=$(as_list_sessions 2>/dev/null) || return 1
+  while IFS= read -r -d "$RS" rec; do
+    [ -n "$rec" ] || continue
+    IFS="$FS" read -r id name tty busy atp <<EOF
+$rec
+EOF
+    S_IDS[${#S_IDS[@]}]="$id"
+    S_NAMES[${#S_NAMES[@]}]="$name"
+    S_TTYS[${#S_TTYS[@]}]="$tty"
+    S_BUSY[${#S_BUSY[@]}]="$busy"
+    S_PROMPT[${#S_PROMPT[@]}]="$atp"
+  done <<EOF
+$raw
+EOF
+  return 0
+}
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# In glob mode $pat is deliberately left unquoted -- globbing is the point.
+# shellcheck disable=SC2254
+name_matches() {
+  local name="$1" pat="$2"
+  if [ "$OPT_IGNORE_CASE" -eq 1 ]; then
+    name=$(lower "$name"); pat=$(lower "$pat")
+  fi
+  case "$OPT_MATCH_MODE" in
+    contains) case "$name" in *"$pat"*) return 0 ;; *) return 1 ;; esac ;;
+    exact)    [ "$name" = "$pat" ] && return 0 || return 1 ;;
+    glob)     case "$name" in $pat) return 0 ;; *) return 1 ;; esac ;;
+    regex)    printf '%s' "$name" | grep -qE -- "$pat" && return 0 || return 1 ;;
+    *)        return 1 ;;
+  esac
+}
+
+is_excluded() {
+  local name="$1" ex
+  [ "${#EXCLUDES[@]}" -gt 0 ] || return 1
+  for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+    case "$name" in *"$ex"*) return 0 ;; esac
+  done
+  return 1
+}
+
+# Resolve targets -> TARGET_IDS / TARGET_NAMES
+TARGET_IDS=(); TARGET_NAMES=()
+
+resolve_targets() {
+  local i n=0 want
+  TARGET_IDS=(); TARGET_NAMES=()
+  load_sessions || return 1
+  i=0
+  while [ "$i" -lt "${#S_IDS[@]}" ]; do
+    local id="${S_IDS[$i]}" name="${S_NAMES[$i]}" tty="${S_TTYS[$i]}"
+    local take=0
+    if [ "${#SESSION_IDS[@]}" -gt 0 ]; then
+      for want in ${SESSION_IDS[@]+"${SESSION_IDS[@]}"}; do
+        [ "$want" = "$id" ] && take=1
+      done
+    elif [ "${#TTY_FILTERS[@]}" -gt 0 ]; then
+      for want in ${TTY_FILTERS[@]+"${TTY_FILTERS[@]}"}; do
+        [ "$want" = "$tty" ] && take=1
+      done
+    elif [ "$OPT_ALL" -eq 1 ]; then
+      take=1
+    else
+      name_matches "$name" "$OPT_MATCH" && take=1
+    fi
+    if [ "$take" -eq 1 ] && is_excluded "$name"; then take=0; fi
+    if [ "$take" -eq 1 ]; then
+      TARGET_IDS[n]="$id"; TARGET_NAMES[n]="$name"
+      n=$(( n + 1 ))
+      if [ "$OPT_FIRST" -eq 1 ]; then break; fi
+    fi
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+
+describe_target() {
+  if [ "${#SESSION_IDS[@]}" -gt 0 ]; then
+    printf '%s session id(s)' "${#SESSION_IDS[@]}"
+  elif [ "${#TTY_FILTERS[@]}" -gt 0 ]; then
+    printf 'tty %s' "$(printf '%s ' ${TTY_FILTERS[@]+"${TTY_FILTERS[@]}"})"
+  elif [ "$OPT_ALL" -eq 1 ]; then
+    printf 'all sessions'
+  else
+    printf '%s "%s"' "$OPT_MATCH_MODE" "$OPT_MATCH"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Config file
+# ---------------------------------------------------------------------------
+
+config_path() {
+  if [ -n "$OPT_CONFIG" ]; then printf '%s\n' "$OPT_CONFIG"; return; fi
+  printf '%s/claude-waker/config\n' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# Values are assigned through a whitelist; the file is never sourced or eval'd.
+apply_config_kv() {
+  local key="$1" val="$2"
+  case "$key" in
+    match)          OPT_MATCH="$val" ;;
+    match_mode)     OPT_MATCH_MODE="$val" ;;
+    ignore_case)    OPT_IGNORE_CASE=$(bool01 "$val") ;;
+    text|message)   OPT_TEXT="$val" ;;
+    count)          OPT_COUNT="$val" ;;
+    every|interval) OPT_EVERY="$val" ;;
+    jitter)         OPT_JITTER="$val" ;;
+    delay)          OPT_DELAY="$val" ;;
+    until)          OPT_UNTIL="$val" ;;
+    deadline)       OPT_DEADLINE="$val" ;;
+    all)            OPT_ALL=$(bool01 "$val") ;;
+    first)          OPT_FIRST=$(bool01 "$val") ;;
+    newline)        OPT_NEWLINE=$(bool01 "$val") ;;
+    esc_first)      OPT_ESC_FIRST=$(bool01 "$val") ;;
+    if_idle)        OPT_IF_IDLE=$(bool01 "$val") ;;
+    if_prompt)      OPT_IF_PROMPT=$(bool01 "$val") ;;
+    notify)         OPT_NOTIFY=$(bool01 "$val") ;;
+    countdown)      OPT_COUNTDOWN=$(bool01 "$val") ;;
+    color)          OPT_COLOR=$(bool01 "$val") ;;
+    legacy_timing)  OPT_LEGACY=$(bool01 "$val") ;;
+    log)            OPT_LOG="$val" ;;
+    exclude)        EXCLUDES[${#EXCLUDES[@]}]="$val" ;;
+    max_targets)    OPT_MAX_TARGETS="$val" ;;
+    *) warn "unknown config key: $key" ;;
+  esac
+}
+
+bool01() {
+  case "$(lower "$1")" in
+    1|true|yes|on)  printf '1\n' ;;
+    0|false|no|off) printf '0\n' ;;
+    *)              printf '0\n' ;;
+  esac
+}
+
+load_config() {
+  local file line key val section="" want="" in_scope=1
+  [ "$OPT_NO_CONFIG" -eq 1 ] && return 0
+  file=$(config_path)
+  [ -r "$file" ] || return 0
+  [ -n "$OPT_PROFILE" ] && want="profile:$OPT_PROFILE"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    # trim
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      \[*\])
+        section="${line#[}"; section="${section%]}"
+        if [ -z "$want" ]; then
+          case "$section" in profile:*) in_scope=0 ;; *) in_scope=1 ;; esac
+        else
+          [ "$section" = "$want" ] && in_scope=1 || in_scope=0
+        fi
+        continue
+        ;;
+    esac
+    [ "$in_scope" -eq 1 ] || continue
+    case "$line" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    # strip one layer of matching quotes
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    apply_config_kv "$key" "$val"
+  done <"$file"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+print_version() { printf '%s %s\n' "$CW_PROG" "$CW_VERSION"; }
+
+usage() {
+  cat <<USAGE
+${C_BOLD}claude-waker${C_RESET} ${CW_VERSION} — keep Claude Code sessions in iTerm2 awake.
+
+${C_BOLD}USAGE${C_RESET}
+  $CW_PROG                        interactive menu (prefilled from config)
+  $CW_PROG run [options]          run the wake loop
+  $CW_PROG <command> [options]
+
+${C_BOLD}COMMANDS${C_RESET}
+  run              run the wake loop non-interactively
+  menu             force the interactive menu
+  list             list iTerm2 sessions
+  status           show resolved settings and current matches, then exit
+  install-plugin   add "Claude Waker" to iTerm2's Scripts menu
+  config           show config file path and current values
+  version, help
+
+${C_BOLD}TARGETING${C_RESET}
+  -m, --match PATTERN       session name to match (default: $DEF_MATCH)
+  -M, --match-mode MODE     contains | exact | glob | regex (default: contains)
+  -i, --ignore-case         case-insensitive matching
+      --session-id UUID     target an exact session id (repeatable)
+      --tty DEV             target an exact tty (repeatable)
+  -a, --all                 target every session
+      --exclude PATTERN     skip sessions containing PATTERN (repeatable)
+      --first               only the first match
+      --require-match       exit non-zero if nothing matches
+      --max-targets N       refuse to run if more than N sessions match
+
+${C_BOLD}MESSAGE${C_RESET}
+  -t, --text STR            text to send (default: "$DEF_TEXT"); repeat to rotate
+      --text-file FILE      read the text from a file
+      --no-newline          do not press Enter after the text
+      --esc-first           send Escape before the text
+
+${C_BOLD}SCHEDULE${C_RESET}
+  -n, --count N             how many times to send (default: $DEF_COUNT; 0 = forever)
+      --forever             same as --count 0
+  -e, --every DUR           interval between sends (default: $DEF_EVERY)
+      --jitter DUR|N%       randomise each interval by +/- this much
+      --delay DUR           wait before the first send
+      --at HH:MM            first send at this wall-clock time
+      --until HH:MM         stop sending after this time
+      --deadline DUR        stop after this much total elapsed time
+      --legacy-timing       reproduce the original script's asymmetric sleep
+
+${C_BOLD}GUARDS${C_RESET}
+      --if-idle             skip sessions that are streaming output right now
+                            (iTerm2's "is processing" — true while Claude is
+                            answering, false while it waits for input; a
+                            silent command such as sleep still reads as idle)
+      --if-prompt           only send when the session is at a shell prompt
+                            (requires iTerm2 shell integration)
+      --stop-if-gone        exit if a targeted session disappears
+
+${C_BOLD}OUTPUT${C_RESET}
+  -d, --dry-run             print what would happen; send nothing
+  -q, --quiet               errors only
+  -v, --verbose             extra detail
+      --log FILE            append a timestamped log
+      --notify              macOS notification on each wake
+      --countdown / --no-countdown
+      --no-color
+      --print-cmd           print the equivalent command line and exit
+  -y, --yes                 never prompt; skip the menu
+  -c, --config FILE         use an alternate config file
+      --no-config           ignore the config file
+  -p, --profile NAME        use a [profile:NAME] section from the config
+
+${C_BOLD}DURATIONS${C_RESET}
+  Plain seconds (2700) or units: 90s, 45m, 1h30m, 2d.
+
+${C_BOLD}EXAMPLES${C_RESET}
+  $CW_PROG                                    # menu, ready to go
+  $CW_PROG run                                # the original loop, fixed timing
+  $CW_PROG run -m dev3 -n 16 -e 45m           # explicit
+  $CW_PROG run -a --if-idle -t continue       # every idle session
+  $CW_PROG run -m dev --forever -e 30m --jitter 10%
+  $CW_PROG list
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+need_val() { [ "$2" -gt 0 ] || die 2 "option $1 requires a value"; }
+
+parse_args() {
+  local _last_argc=0
+  while [ $# -gt 0 ]; do
+    # A branch that fails to consume anything would spin here forever
+    # (`shift 2` is a no-op when only one argument is left). Fail loudly
+    # instead of hanging.
+    if [ "$_last_argc" -eq "$#" ]; then
+      die 2 "option $1 requires a value"
+    fi
+    _last_argc=$#
+    SAW_ARGS=1
+    case "$1" in
+      -m|--match)        need_val "$1" $(( $# - 1 )); OPT_MATCH="$2"; shift 2 ;;
+      -M|--match-mode)   need_val "$1" $(( $# - 1 )); OPT_MATCH_MODE="$2"; shift 2 ;;
+      -i|--ignore-case)  OPT_IGNORE_CASE=1; shift ;;
+      --session-id)      need_val "$1" $(( $# - 1 )); SESSION_IDS[${#SESSION_IDS[@]}]="$2"; shift 2 ;;
+      --tty)             need_val "$1" $(( $# - 1 )); TTY_FILTERS[${#TTY_FILTERS[@]}]="$2"; shift 2 ;;
+      -a|--all)          OPT_ALL=1; shift ;;
+      --exclude)         need_val "$1" $(( $# - 1 )); EXCLUDES[${#EXCLUDES[@]}]="$2"; shift 2 ;;
+      --first)           OPT_FIRST=1; shift ;;
+      --require-match)   OPT_REQUIRE_MATCH=1; shift ;;
+      --max-targets)     need_val "$1" $(( $# - 1 )); OPT_MAX_TARGETS="$2"; shift 2 ;;
+
+      -t|--text|--message) need_val "$1" $(( $# - 1 )); TEXTS[${#TEXTS[@]}]="$2"; shift 2 ;;
+      --text-file)       need_val "$1" $(( $# - 1 ))
+                         [ -r "$2" ] || die 2 "cannot read --text-file: $2"
+                         TEXTS[${#TEXTS[@]}]="$(cat "$2")"; shift 2 ;;
+      --no-newline)      OPT_NEWLINE=0; shift ;;
+      --newline)         OPT_NEWLINE=1; shift ;;
+      --esc-first)       OPT_ESC_FIRST=1; shift ;;
+
+      -n|--count)        need_val "$1" $(( $# - 1 )); OPT_COUNT="$2"; shift 2 ;;
+      --forever)         OPT_COUNT=0; shift ;;
+      -e|--every|--interval) need_val "$1" $(( $# - 1 )); OPT_EVERY="$2"; shift 2 ;;
+      --jitter)          need_val "$1" $(( $# - 1 )); OPT_JITTER="$2"; shift 2 ;;
+      --delay|--start-in) need_val "$1" $(( $# - 1 )); OPT_DELAY="$2"; shift 2 ;;
+      --at)              need_val "$1" $(( $# - 1 )); OPT_AT="$2"; shift 2 ;;
+      --until)           need_val "$1" $(( $# - 1 )); OPT_UNTIL="$2"; shift 2 ;;
+      --deadline)        need_val "$1" $(( $# - 1 )); OPT_DEADLINE="$2"; shift 2 ;;
+      --legacy-timing)   OPT_LEGACY=1; shift ;;
+
+      --if-idle)         OPT_IF_IDLE=1; shift ;;
+      --if-prompt)       OPT_IF_PROMPT=1; shift ;;
+      --stop-if-gone)    OPT_STOP_IF_GONE=1; shift ;;
+
+      -d|--dry-run)      OPT_DRY_RUN=1; shift ;;
+      -q|--quiet)        OPT_QUIET=1; shift ;;
+      -v|--verbose)      OPT_VERBOSE=1; shift ;;
+      --log)             need_val "$1" $(( $# - 1 )); OPT_LOG="$2"; shift 2 ;;
+      --notify)          OPT_NOTIFY=1; shift ;;
+      --countdown)       OPT_COUNTDOWN=1; shift ;;
+      --no-countdown)    OPT_COUNTDOWN=0; shift ;;
+      --no-color)        OPT_COLOR=0; shift ;;
+      --color)           OPT_COLOR=1; shift ;;
+      --print-cmd)       OPT_PRINT_CMD=1; shift ;;
+      -y|--yes)          OPT_YES=1; shift ;;
+      --menu)            OPT_FORCE_MENU=1; shift ;;
+
+      # Values already read by prescan_config_args; still validated here so a
+      # missing one is a usage error rather than a short shift.
+      -c|--config)       need_val "$1" $(( $# - 1 )); shift 2 ;;
+      --no-config)       shift ;;
+      -p|--profile)      need_val "$1" $(( $# - 1 )); shift 2 ;;
+
+      -h|--help)         usage; exit 0 ;;
+      -V|--version)      print_version; exit 0 ;;
+
+      --) shift; break ;;
+      -*) die 2 "unknown option: $1  (try '$CW_PROG --help')" ;;
+      *)  die 2 "unexpected argument: $1  (try '$CW_PROG --help')" ;;
+    esac
+  done
+
+  [ "${#TEXTS[@]}" -gt 0 ] && OPT_TEXT="${TEXTS[0]}"
+  return 0
+}
+
+# Options that consume the next argument. Used so that a subcommand-looking
+# value (e.g. `-t status`) is not mistaken for the subcommand itself.
+is_value_flag() {
+  case "$1" in
+    -m|--match|-M|--match-mode|--session-id|--tty|--exclude|--max-targets| \
+    -t|--text|--message|--text-file|-n|--count|-e|--every|--interval| \
+    --jitter|--delay|--start-in|--at|--until|--deadline|--log|-c|--config|-p|--profile)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Pull the subcommand out of argv wherever it appears, so that both
+# `claude-waker list -v` and `claude-waker -v list` work.
+CW_CMD=""
+CW_ARGV=()
+
+extract_subcommand() {
+  local a prev="" found=0
+  CW_CMD=""
+  CW_ARGV=()
+  for a in ${@+"$@"}; do
+    if [ "$found" -eq 0 ] && ! is_value_flag "$prev"; then
+      case "$a" in
+        run|menu|list|status|install-plugin|config|version|help)
+          CW_CMD="$a"; found=1; prev="$a"; continue ;;
+      esac
+    fi
+    CW_ARGV[${#CW_ARGV[@]}]="$a"
+    prev="$a"
+  done
+  return 0
+}
+
+# Config-affecting flags must be known before the config file is read.
+prescan_config_args() {
+  local prev=""
+  for a in ${@+"$@"}; do
+    case "$prev" in
+      -c|--config)  OPT_CONFIG="$a" ;;
+      -p|--profile) OPT_PROFILE="$a" ;;
+    esac
+    case "$a" in
+      --no-config) OPT_NO_CONFIG=1 ;;
+    esac
+    prev="$a"
+  done
+}
+
+validate_opts() {
+  case "$OPT_MATCH_MODE" in
+    contains|exact|glob|regex) ;;
+    *) die 2 "--match-mode must be contains, exact, glob or regex (got: $OPT_MATCH_MODE)" ;;
+  esac
+  case "$OPT_COUNT" in
+    ''|*[!0-9]*) die 2 "--count must be a non-negative integer (got: $OPT_COUNT)" ;;
+  esac
+  case "$OPT_MAX_TARGETS" in
+    ''|*[!0-9]*) die 2 "--max-targets must be a non-negative integer" ;;
+  esac
+  # Legacy timing sleeps only for the first half of a fixed run. With no count
+  # the half-way point is zero, so every sleep would be skipped and the loop
+  # would spin flat out.
+  if [ "$OPT_LEGACY" -eq 1 ] && [ "$OPT_COUNT" -eq 0 ]; then
+    die 2 "--legacy-timing needs a fixed --count; it mirrors the original loop's half-way sleep"
+  fi
+  EVERY_SECS=$(parse_duration "$OPT_EVERY") || die 2 "cannot parse --every: $OPT_EVERY"
+  [ "$EVERY_SECS" -ge 1 ] || die 2 "--every must be at least 1 second"
+  DELAY_SECS=0
+  if [ -n "$OPT_DELAY" ]; then
+    DELAY_SECS=$(parse_duration "$OPT_DELAY") || die 2 "cannot parse --delay: $OPT_DELAY"
+  fi
+  if [ -n "$OPT_AT" ]; then
+    DELAY_SECS=$(seconds_until_clock "$OPT_AT") || die 2 "cannot parse --at (expected HH:MM): $OPT_AT"
+  fi
+  STOP_AT=0
+  if [ -n "$OPT_UNTIL" ]; then
+    local u; u=$(seconds_until_clock "$OPT_UNTIL") || die 2 "cannot parse --until (expected HH:MM): $OPT_UNTIL"
+    STOP_AT=$(( $(date +%s) + u ))
+  fi
+  if [ -n "$OPT_DEADLINE" ]; then
+    local d; d=$(parse_duration "$OPT_DEADLINE") || die 2 "cannot parse --deadline: $OPT_DEADLINE"
+    STOP_AT=$(( $(date +%s) + d ))
+  fi
+  if [ -n "$OPT_JITTER" ]; then
+    case "$OPT_JITTER" in
+      *%) case "${OPT_JITTER%\%}" in ''|*[!0-9]*) die 2 "--jitter percentage must be numeric" ;; esac ;;
+      *)  parse_duration "$OPT_JITTER" >/dev/null || die 2 "cannot parse --jitter: $OPT_JITTER" ;;
+    esac
+  fi
+  if [ -n "$OPT_LOG" ]; then
+    local dir="${OPT_LOG%/*}"
+    [ "$dir" = "$OPT_LOG" ] && dir="."
+    [ -d "$dir" ] || die 2 "--log directory does not exist: $dir"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Equivalent command line
+# ---------------------------------------------------------------------------
+
+shq() {
+  case "$1" in
+    *[!A-Za-z0-9._/=:@%+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    '') printf "''" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+equivalent_cmd() {
+  local out="$CW_PROG run" t
+  if [ "${#SESSION_IDS[@]}" -gt 0 ]; then
+    local sid
+    for sid in ${SESSION_IDS[@]+"${SESSION_IDS[@]}"}; do
+      out="$out --session-id $(shq "$sid")"
+    done
+  elif [ "$OPT_ALL" -eq 1 ]; then
+    out="$out --all"
+  else
+    out="$out -m $(shq "$OPT_MATCH")"
+    [ "$OPT_MATCH_MODE" != "contains" ] && out="$out -M $OPT_MATCH_MODE"
+  fi
+  [ "$OPT_IGNORE_CASE" -eq 1 ] && out="$out -i"
+  [ "$OPT_FIRST" -eq 1 ] && out="$out --first"
+  for t in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do out="$out --exclude $(shq "$t")"; done
+  if [ "${#TEXTS[@]}" -gt 1 ]; then
+    for t in ${TEXTS[@]+"${TEXTS[@]}"}; do out="$out -t $(shq "$t")"; done
+  else
+    out="$out -t $(shq "$OPT_TEXT")"
+  fi
+  [ "$OPT_NEWLINE" -eq 0 ] && out="$out --no-newline"
+  [ "$OPT_ESC_FIRST" -eq 1 ] && out="$out --esc-first"
+  out="$out -n $OPT_COUNT -e $(shq "$OPT_EVERY")"
+  [ -n "$OPT_JITTER" ] && out="$out --jitter $(shq "$OPT_JITTER")"
+  [ -n "$OPT_DELAY" ] && out="$out --delay $(shq "$OPT_DELAY")"
+  [ -n "$OPT_AT" ] && out="$out --at $(shq "$OPT_AT")"
+  [ -n "$OPT_UNTIL" ] && out="$out --until $(shq "$OPT_UNTIL")"
+  [ -n "$OPT_DEADLINE" ] && out="$out --deadline $(shq "$OPT_DEADLINE")"
+  [ "$OPT_LEGACY" -eq 1 ] && out="$out --legacy-timing"
+  [ "$OPT_IF_IDLE" -eq 1 ] && out="$out --if-idle"
+  [ "$OPT_IF_PROMPT" -eq 1 ] && out="$out --if-prompt"
+  [ "$OPT_STOP_IF_GONE" -eq 1 ] && out="$out --stop-if-gone"
+  [ "$OPT_NOTIFY" -eq 1 ] && out="$out --notify"
+  [ -n "$OPT_LOG" ] && out="$out --log $(shq "$OPT_LOG")"
+  printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Commands: list / status / config / install-plugin
+# ---------------------------------------------------------------------------
+
+session_flags() {
+  local busy="$1" atp="$2" out=""
+  [ "$busy" = "true" ] && out="busy"
+  [ "$atp" = "true" ] && out="${out:+$out,}prompt"
+  printf '%s' "${out:-idle}"
+}
+
+cmd_list() {
+  require_iterm
+  load_sessions || die 1 "could not query iTerm2"
+  [ "${#S_IDS[@]}" -gt 0 ] || { say "No iTerm2 sessions found."; return 0; }
+  local i=0
+  printf '%s%-3s %-14s %-10s %s%s\n' "$C_DIM" "#" "TTY" "STATE" "NAME" "$C_RESET"
+  while [ "$i" -lt "${#S_IDS[@]}" ]; do
+    printf '%-3s %-14s %-10s %s\n' \
+      "$(( i + 1 ))" \
+      "${S_TTYS[$i]##*/}" \
+      "$(session_flags "${S_BUSY[$i]}" "${S_PROMPT[$i]}")" \
+      "${S_NAMES[$i]}"
+    [ "$OPT_VERBOSE" -eq 1 ] && printf '    %sid %s%s\n' "$C_DIM" "${S_IDS[$i]}" "$C_RESET"
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+
+cmd_status() {
+  require_iterm
+  resolve_targets || die 1 "could not query iTerm2"
+  local total
+  if [ "$OPT_COUNT" -eq 0 ]; then
+    total="forever"
+  else
+    total=$(fmt_duration $(( EVERY_SECS * (OPT_COUNT - 1) )) )
+  fi
+  say "${C_BOLD}Target${C_RESET}    $(describe_target)"
+  say "${C_BOLD}Message${C_RESET}   \"$OPT_TEXT\"$( [ "$OPT_NEWLINE" -eq 0 ] && printf ' (no Enter)')"
+  if [ "$OPT_COUNT" -eq 0 ]; then
+    say "${C_BOLD}Schedule${C_RESET}  every $(fmt_duration "$EVERY_SECS"), no limit"
+  else
+    say "${C_BOLD}Schedule${C_RESET}  ${OPT_COUNT} x every $(fmt_duration "$EVERY_SECS")   total ${total}"
+  fi
+  say "${C_BOLD}Guards${C_RESET}    $( guards_desc )"
+  say ""
+  if [ "${#TARGET_IDS[@]}" -eq 0 ]; then
+    say "${C_YELLOW}No sessions match.${C_RESET}"
+    [ "$OPT_REQUIRE_MATCH" -eq 1 ] && return 4
+    return 0
+  fi
+  say "${C_BOLD}Matches${C_RESET} (${#TARGET_IDS[@]}):"
+  local i=0
+  while [ "$i" -lt "${#TARGET_IDS[@]}" ]; do
+    say "  ${C_GREEN}*${C_RESET} ${TARGET_NAMES[$i]}"
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+
+guards_desc() {
+  local g=""
+  [ "$OPT_IF_IDLE" -eq 1 ] && g="${g:+$g, }skip busy"
+  [ "$OPT_IF_PROMPT" -eq 1 ] && g="${g:+$g, }shell prompt only"
+  [ "$OPT_STOP_IF_GONE" -eq 1 ] && g="${g:+$g, }stop if gone"
+  [ "$OPT_ESC_FIRST" -eq 1 ] && g="${g:+$g, }esc first"
+  [ -n "$OPT_JITTER" ] && g="${g:+$g, }jitter $OPT_JITTER"
+  printf '%s' "${g:-—}"
+}
+
+cmd_config() {
+  local f; f=$(config_path)
+  say "${C_BOLD}Config file${C_RESET}  $f$( [ -r "$f" ] || printf ' %s(not present)%s' "$C_DIM" "$C_RESET")"
+  say ""
+  say "${C_BOLD}Effective settings${C_RESET}"
+  say "  match         $OPT_MATCH"
+  say "  match_mode    $OPT_MATCH_MODE"
+  say "  text          $OPT_TEXT"
+  say "  count         $OPT_COUNT"
+  say "  every         $OPT_EVERY"
+  say "  if_idle       $OPT_IF_IDLE"
+  say "  legacy_timing $OPT_LEGACY"
+  if [ ! -r "$f" ]; then
+    say ""
+    say "${C_DIM}Create it with:${C_RESET}"
+    say "  mkdir -p $(dirname "$f") && cat > $f <<'EOF'"
+    say "  match = $DEF_MATCH"
+    say "  text  = $DEF_TEXT"
+    say "  count = $DEF_COUNT"
+    say "  every = $DEF_EVERY"
+    say "  EOF"
+  fi
+  return 0
+}
+
+ITERM_SCRIPTS_DIR="$HOME/Library/Application Support/iTerm2/Scripts"
+
+cmd_install_plugin() {
+  local dest="$ITERM_SCRIPTS_DIR/Claude Waker.py"
+  local self_dir bundled
+  self_dir=$(cd "$(dirname "$0")" && pwd)
+  bundled="$self_dir/../iterm2/Claude Waker.py"
+
+  mkdir -p "$ITERM_SCRIPTS_DIR" || die 1 "could not create $ITERM_SCRIPTS_DIR"
+
+  if [ -r "$bundled" ]; then
+    cp "$bundled" "$dest" || die 1 "could not write $dest"
+  else
+    cat >"$dest" <<'PYEOF' || die 1 "could not write $dest"
+#!/usr/bin/env python3
+"""Claude Waker — opens a new iTerm2 window running the interactive menu."""
+import iterm2
+
+WAKER = "claude-waker"
+
+async def main(connection):
+    app = await iterm2.async_get_app(connection)
+    window = await iterm2.Window.async_create(connection)
+    if window is None:
+        window = app.current_terminal_window
+    session = window.current_tab.current_session
+    await session.async_send_text(f"{WAKER} menu\n")
+
+iterm2.run_until_complete(main)
+PYEOF
+  fi
+
+  say "${C_GREEN}Installed${C_RESET} $dest"
+  say ""
+  say "Next:"
+  say "  1. iTerm2 > Settings > General > Magic > ${C_BOLD}Enable Python API${C_RESET}"
+  say "  2. Restart iTerm2"
+  say "  3. Scripts > ${C_BOLD}Claude Waker${C_RESET}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Interactive menu
+# ---------------------------------------------------------------------------
+
+menu_prompt() {
+  local var_name="$1" prompt="$2" current="$3" reply
+  printf '%s%s%s ' "$C_CYAN" "$prompt" "$C_RESET"
+  [ -n "$current" ] && printf '%s[%s]%s ' "$C_DIM" "$current" "$C_RESET"
+  IFS= read -r reply || return 1
+  [ -n "$reply" ] && eval "$var_name=\$reply"
+  return 0
+}
+
+menu_target_picker() {
+  load_sessions || { warn "could not query iTerm2"; return 1; }
+  printf '\n%sPick target sessions%s\n\n' "$C_BOLD" "$C_RESET"
+  local i=0
+  while [ "$i" -lt "${#S_IDS[@]}" ]; do
+    printf '  %s%2d%s) %-9s %s\n' "$C_CYAN" "$(( i + 1 ))" "$C_RESET" \
+      "$(session_flags "${S_BUSY[$i]}" "${S_PROMPT[$i]}")" "${S_NAMES[$i]}"
+    i=$(( i + 1 ))
+  done
+  printf '\n  %sEnter numbers (2, 1,3, 1-4), a pattern, "all", or blank to cancel.%s\n' "$C_DIM" "$C_RESET"
+  printf '%s>%s ' "$C_CYAN" "$C_RESET"
+  local reply; IFS= read -r reply || return 1
+  [ -n "$reply" ] || return 0
+
+  if [ "$reply" = "all" ]; then
+    OPT_ALL=1; SESSION_IDS=(); return 0
+  fi
+
+  case "$reply" in
+    *[!0-9,\ -]*)
+      OPT_ALL=0; SESSION_IDS=(); OPT_MATCH="$reply"
+      return 0
+      ;;
+  esac
+
+  # numeric selection
+  local picked=() part start end n
+  local oldifs="$IFS"; IFS=', '
+  # Splitting on comma/space is exactly what we want here.
+  # shellcheck disable=SC2086
+  set -- $reply
+  IFS="$oldifs"
+  for part in "$@"; do
+    [ -n "$part" ] || continue
+    case "$part" in
+      *-*)
+        start="${part%%-*}"; end="${part##*-}"
+        [ -n "$start" ] && [ -n "$end" ] || continue
+        n="$start"
+        while [ "$n" -le "$end" ]; do
+          picked[${#picked[@]}]="$n"; n=$(( n + 1 ))
+        done
+        ;;
+      *) picked[${#picked[@]}]="$part" ;;
+    esac
+  done
+
+  SESSION_IDS=(); OPT_ALL=0
+  for n in ${picked[@]+"${picked[@]}"}; do
+    if [ "$n" -ge 1 ] && [ "$n" -le "${#S_IDS[@]}" ]; then
+      SESSION_IDS[${#SESSION_IDS[@]}]="${S_IDS[$(( n - 1 ))]}"
+    else
+      warn "ignoring out-of-range selection: $n"
+    fi
+  done
+  return 0
+}
+
+menu_guards() {
+  printf '\n%sGuards%s\n\n' "$C_BOLD" "$C_RESET"
+  printf '  %s1%s) skip busy sessions        %s\n' "$C_CYAN" "$C_RESET" "$( [ "$OPT_IF_IDLE" -eq 1 ] && printf 'on' || printf 'off')"
+  printf '  %s2%s) shell prompt only         %s\n' "$C_CYAN" "$C_RESET" "$( [ "$OPT_IF_PROMPT" -eq 1 ] && printf 'on' || printf 'off')"
+  printf '  %s3%s) send Escape first         %s\n' "$C_CYAN" "$C_RESET" "$( [ "$OPT_ESC_FIRST" -eq 1 ] && printf 'on' || printf 'off')"
+  printf '  %s4%s) stop if session gone      %s\n' "$C_CYAN" "$C_RESET" "$( [ "$OPT_STOP_IF_GONE" -eq 1 ] && printf 'on' || printf 'off')"
+  printf '  %s5%s) macOS notifications       %s\n' "$C_CYAN" "$C_RESET" "$( [ "$OPT_NOTIFY" -eq 1 ] && printf 'on' || printf 'off')"
+  printf '  %s6%s) jitter                    %s\n' "$C_CYAN" "$C_RESET" "${OPT_JITTER:-off}"
+  printf '\n%s>%s ' "$C_CYAN" "$C_RESET"
+  local reply; IFS= read -r reply || return 1
+  case "$reply" in
+    1) OPT_IF_IDLE=$(( 1 - OPT_IF_IDLE )) ;;
+    2) OPT_IF_PROMPT=$(( 1 - OPT_IF_PROMPT )) ;;
+    3) OPT_ESC_FIRST=$(( 1 - OPT_ESC_FIRST )) ;;
+    4) OPT_STOP_IF_GONE=$(( 1 - OPT_STOP_IF_GONE )) ;;
+    5) OPT_NOTIFY=$(( 1 - OPT_NOTIFY )) ;;
+    6) local j="$OPT_JITTER"
+       menu_prompt j "jitter (e.g. 5m or 10%, blank clears):" "$OPT_JITTER"
+       OPT_JITTER="$j"
+       [ "$OPT_JITTER" = "off" ] && OPT_JITTER=""
+       ;;
+  esac
+  return 0
+}
+
+MENU_WIDTH=48
+
+repeat_char() {
+  local n="$1" c="$2" out=""
+  while [ "$n" -gt 0 ]; do out="$out$c"; n=$(( n - 1 )); done
+  printf '%s' "$out"
+}
+
+draw_menu() {
+  resolve_targets >/dev/null 2>&1
+  local n="${#TARGET_IDS[@]}" total i
+  if [ "$OPT_COUNT" -eq 0 ]; then
+    total="forever"
+  else
+    total="≈ $(fmt_duration $(( EVERY_SECS * (OPT_COUNT - 1) )) )"
+  fi
+
+  local title=" claude-waker $CW_VERSION "
+  local pad=$(( MENU_WIDTH - 1 - ${#title} ))
+  [ "$pad" -lt 0 ] && pad=0
+
+  printf '\033[2J\033[H'
+  printf '%s╭─%s%s╮%s\n' "$C_BOLD" "$title" "$(repeat_char "$pad" '─')" "$C_RESET"
+  printf '  %sTarget%s     %s  %s→ %d session%s%s\n' "$C_BOLD" "$C_RESET" "$(describe_target)" \
+    "$C_DIM" "$n" "$( [ "$n" -eq 1 ] || printf s )" "$C_RESET"
+  i=0
+  while [ "$i" -lt "$n" ] && [ "$i" -lt 6 ]; do
+    printf '               %s%s%s\n' "$C_GREEN" "${TARGET_NAMES[$i]}" "$C_RESET"
+    i=$(( i + 1 ))
+  done
+  [ "$n" -gt 6 ] && printf '               %s… and %d more%s\n' "$C_DIM" "$(( n - 6 ))" "$C_RESET"
+  [ "$n" -eq 0 ] && printf '               %sno match — nothing would be sent%s\n' "$C_YELLOW" "$C_RESET"
+  printf '  %sMessage%s    "%s"%s\n' "$C_BOLD" "$C_RESET" "$OPT_TEXT" "$( [ "$OPT_NEWLINE" -eq 0 ] && printf ' (no Enter)')"
+  printf '  %sRepeats%s    %s\n' "$C_BOLD" "$C_RESET" "$( [ "$OPT_COUNT" -eq 0 ] && printf 'forever' || printf '%s' "$OPT_COUNT")"
+  printf '  %sInterval%s   %s  %s%s%s\n' "$C_BOLD" "$C_RESET" "$(fmt_duration "$EVERY_SECS")" "$C_DIM" "$total" "$C_RESET"
+  printf '  %sGuards%s     %s\n' "$C_BOLD" "$C_RESET" "$(guards_desc)"
+  printf '%s╰%s╯%s\n' "$C_BOLD" "$(repeat_char "$MENU_WIDTH" '─')" "$C_RESET"
+  printf '\n'
+  printf ' %s1%s) target   %s2%s) message   %s3%s) repeats   %s4%s) interval\n' \
+    "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf ' %s5%s) guards   %s6%s) dry run   %s7%s) show equivalent command\n' \
+    "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf ' %ss%s) start    %sq%s) quit\n' "$C_GREEN" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf '\n%s>%s ' "$C_CYAN" "$C_RESET"
+}
+
+cmd_menu() {
+  require_iterm
+  local reply tmp
+  while :; do
+    draw_menu
+    IFS= read -r reply || { printf '\n'; return 0; }
+    case "$reply" in
+      1) menu_target_picker ;;
+      2) tmp="$OPT_TEXT"
+         menu_prompt tmp "message to send:" "$OPT_TEXT"
+         OPT_TEXT="$tmp"; TEXTS=("$OPT_TEXT")
+         ;;
+      3) tmp="$OPT_COUNT"
+         menu_prompt tmp "repeats (0 = forever):" "$OPT_COUNT"
+         case "$tmp" in
+           ''|*[!0-9]*) warn "not a number: $tmp"; sleep 1 ;;
+           *) OPT_COUNT="$tmp" ;;
+         esac
+         ;;
+      4) tmp="$OPT_EVERY"
+         menu_prompt tmp "interval (45m, 1h30m, 2700):" "$OPT_EVERY"
+         if parse_duration "$tmp" >/dev/null 2>&1; then
+           OPT_EVERY="$tmp"; EVERY_SECS=$(parse_duration "$tmp")
+         else
+           warn "cannot parse duration: $tmp"; sleep 1
+         fi
+         ;;
+      5) menu_guards ;;
+      6) OPT_DRY_RUN=1
+         printf '\n'
+         run_loop
+         OPT_DRY_RUN=0
+         printf '\n%sPress Enter to return to the menu.%s' "$C_DIM" "$C_RESET"
+         IFS= read -r tmp
+         ;;
+      7) printf '\n  %s%s%s\n\n' "$C_BOLD" "$(equivalent_cmd)" "$C_RESET"
+         printf '%sPress Enter to return to the menu.%s' "$C_DIM" "$C_RESET"
+         IFS= read -r tmp
+         ;;
+      s|S|"") printf '\n'; run_loop; return $? ;;
+      q|Q) printf '\n'; return 0 ;;
+      *) ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# The wake loop
+# ---------------------------------------------------------------------------
+
+# Sleep with a live countdown and single-key controls.
+# Returns 0 to continue, 2 to quit.
+wait_interval() {
+  local secs="$1" next_label="$2"
+  local end now remaining key paused=0 interactive=0 countdown=0
+
+  if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    say "       ${C_DIM}would wait $(fmt_duration "$secs")${C_RESET}"
+    return 0
+  fi
+
+  [ "$OPT_COUNTDOWN" -eq 1 ] && countdown=1
+  [ "$OPT_COUNTDOWN" -eq -1 ] && [ -t 1 ] && [ "$OPT_QUIET" -eq 0 ] && countdown=1
+  [ "$countdown" -eq 1 ] && [ -t 0 ] && interactive=1
+
+  if [ "$countdown" -eq 0 ]; then
+    sleep "$secs"
+    return 0
+  fi
+
+  end=$(( $(date +%s) + secs ))
+  hide_cursor
+  while :; do
+    now=$(date +%s)
+    remaining=$(( end - now ))
+    [ "$remaining" -le 0 ] && break
+    if [ "$paused" -eq 1 ]; then
+      printf '\r\033[K       %snext %s · PAUSED · %s left%s   [s send now · p resume · q quit]' \
+        "$C_YELLOW" "$next_label" "$(fmt_clock "$remaining")" "$C_RESET"
+    else
+      printf '\r\033[K       %snext %s · %s left%s   [s send now · p pause · +/- 5m · q quit]' \
+        "$C_DIM" "$next_label" "$(fmt_clock "$remaining")" "$C_RESET"
+    fi
+    if [ "$interactive" -eq 1 ]; then
+      if read -r -s -n 1 -t 1 key 2>/dev/null; then
+        case "$key" in
+          s|S) show_cursor; printf '\r\033[K'; return 0 ;;
+          q|Q) show_cursor; printf '\r\033[K'; return 2 ;;
+          p|P) paused=$(( 1 - paused )) ;;
+          +|=) end=$(( end + 300 )) ;;
+          -|_) end=$(( end - 300 )) ;;
+        esac
+      fi
+    else
+      sleep 1
+    fi
+    [ "$paused" -eq 1 ] && end=$(( end + 1 ))
+  done
+  show_cursor
+  printf '\r\033[K'
+  return 0
+}
+
+do_send() {
+  local msg="$1"
+  local raw rec id name status sent=0
+
+  resolve_targets || { warn "could not query iTerm2"; return 1; }
+
+  if [ "${#TARGET_IDS[@]}" -eq 0 ]; then
+    warn "no sessions match $(describe_target)"
+    logline "no match for $(describe_target)"
+    [ "$OPT_STOP_IF_GONE" -eq 1 ] && return 3
+    [ "$OPT_REQUIRE_MATCH" -eq 1 ] && return 3
+    return 0
+  fi
+
+  if [ "$OPT_MAX_TARGETS" -gt 0 ] && [ "${#TARGET_IDS[@]}" -gt "$OPT_MAX_TARGETS" ]; then
+    err "${#TARGET_IDS[@]} sessions match but --max-targets is $OPT_MAX_TARGETS"
+    return 3
+  fi
+
+  if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    local i=0
+    while [ "$i" -lt "${#TARGET_IDS[@]}" ]; do
+      say "  ${C_DIM}would send${C_RESET} \"$msg\" ${C_DIM}→${C_RESET} ${TARGET_NAMES[$i]}"
+      i=$(( i + 1 ))
+    done
+    SENT_TOTAL=$(( SENT_TOTAL + 1 ))
+    return 0
+  fi
+
+  raw=$(as_send "$msg" "$OPT_NEWLINE" "$OPT_ESC_FIRST" "$OPT_IF_IDLE" "$OPT_IF_PROMPT" \
+        ${TARGET_IDS[@]+"${TARGET_IDS[@]}"} 2>/dev/null) || {
+    warn "osascript failed while sending"
+    return 1
+  }
+
+  while IFS= read -r -d "$RS" rec; do
+    [ -n "$rec" ] || continue
+    IFS="$FS" read -r id name status <<EOF
+$rec
+EOF
+    case "$status" in
+      sent)
+        sent=$(( sent + 1 ))
+        say "  ${C_GREEN}→${C_RESET} ${name}"
+        logline "sent \"$msg\" to \"$name\" ($id)"
+        ;;
+      skipped-busy)
+        say "  ${C_YELLOW}·${C_RESET} ${name} ${C_DIM}(busy, skipped)${C_RESET}"
+        logline "skipped busy \"$name\" ($id)"
+        ;;
+      skipped-noprompt)
+        say "  ${C_YELLOW}·${C_RESET} ${name} ${C_DIM}(not at prompt, skipped)${C_RESET}"
+        logline "skipped not-at-prompt \"$name\" ($id)"
+        ;;
+    esac
+  done <<EOF
+$raw
+EOF
+
+  [ "$sent" -gt 0 ] && SENT_TOTAL=$(( SENT_TOTAL + 1 ))
+  notify "claude-waker" "Sent \"$msg\" to $sent session(s)"
+  return 0
+}
+
+run_loop() {
+  local i msg wait_secs next_label rc
+
+  if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    say "${C_BOLD}Dry run${C_RESET} ${C_DIM}— nothing will be sent${C_RESET}"
+  fi
+
+  if [ "$DELAY_SECS" -gt 0 ]; then
+    next_label=$(date -v "+${DELAY_SECS}S" '+%H:%M:%S' 2>/dev/null || printf '?')
+    say "${C_DIM}First send at ${next_label} (in $(fmt_duration "$DELAY_SECS")).${C_RESET}"
+    wait_interval "$DELAY_SECS" "$next_label" || return 0
+  fi
+
+  i=1
+  while :; do
+    [ "$OPT_COUNT" -gt 0 ] && [ "$i" -gt "$OPT_COUNT" ] && break
+
+    if [ "$STOP_AT" -gt 0 ] && [ "$(date +%s)" -ge "$STOP_AT" ]; then
+      say "${C_DIM}Deadline reached.${C_RESET}"
+      break
+    fi
+
+    # Rotating messages
+    if [ "${#TEXTS[@]}" -gt 1 ]; then
+      msg="${TEXTS[$(( (i - 1) % ${#TEXTS[@]} ))]}"
+    else
+      msg="$OPT_TEXT"
+    fi
+
+    if [ "$OPT_COUNT" -gt 0 ]; then
+      say "${C_BOLD}[$i/$OPT_COUNT]${C_RESET} $(date '+%H:%M:%S')  ${C_DIM}sending${C_RESET} \"$msg\""
+    else
+      say "${C_BOLD}[$i]${C_RESET} $(date '+%H:%M:%S')  ${C_DIM}sending${C_RESET} \"$msg\""
+    fi
+
+    do_send "$msg"; rc=$?
+    if [ "$rc" -eq 3 ]; then
+      cleanup
+      die 4 "stopping: target went away or guard tripped"
+    fi
+
+    # Last iteration? No trailing sleep.
+    if [ "$OPT_COUNT" -gt 0 ] && [ "$i" -ge "$OPT_COUNT" ]; then
+      break
+    fi
+
+    # The original script only slept while i < 8 even though it looped 16 times,
+    # leaving iterations 8-16 to fire back to back. --legacy-timing keeps that.
+    if [ "$OPT_LEGACY" -eq 1 ] && [ "$i" -ge $(( OPT_COUNT / 2 )) ]; then
+      i=$(( i + 1 ))
+      continue
+    fi
+
+    wait_secs=$(apply_jitter "$EVERY_SECS")
+
+    # No point sleeping into a deadline we would only then discover we had
+    # passed — if the next wake lands beyond it, stop now.
+    if [ "$STOP_AT" -gt 0 ] && [ $(( $(date +%s) + wait_secs )) -ge "$STOP_AT" ]; then
+      say "${C_DIM}Next wake would fall past the deadline — stopping.${C_RESET}"
+      break
+    fi
+
+    next_label=$(date -v "+${wait_secs}S" '+%H:%M:%S' 2>/dev/null || printf '?')
+    wait_interval "$wait_secs" "$next_label"
+    if [ $? -eq 2 ]; then
+      say "${C_DIM}Quit after ${SENT_TOTAL} wake$( [ "$SENT_TOTAL" -eq 1 ] || printf s ).${C_RESET}"
+      return 0
+    fi
+
+    i=$(( i + 1 ))
+  done
+
+  say ""
+  say "${C_GREEN}Done.${C_RESET} ${SENT_TOTAL} wake$( [ "$SENT_TOTAL" -eq 1 ] || printf s ) delivered."
+  logline "finished: $SENT_TOTAL wakes"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+main() {
+  extract_subcommand ${@+"$@"}
+  local cmd="$CW_CMD"
+  set -- ${CW_ARGV[@]+"${CW_ARGV[@]}"}
+
+  prescan_config_args ${@+"$@"}
+  load_config
+  parse_args ${@+"$@"}
+  setup_color
+  validate_opts
+
+  trap on_interrupt INT TERM
+  trap cleanup EXIT
+  # Exit quietly when a consumer such as `| head` closes the pipe.
+  trap 'exit 0' PIPE
+
+  if [ "$OPT_PRINT_CMD" -eq 1 ]; then
+    equivalent_cmd
+    return 0
+  fi
+
+  case "$cmd" in
+    list)           cmd_list; return $? ;;
+    status)         cmd_status; return $? ;;
+    config)         cmd_config; return $? ;;
+    install-plugin) cmd_install_plugin; return $? ;;
+    version)        print_version; return 0 ;;
+    help)           usage; return 0 ;;
+    menu)           cmd_menu; return $? ;;
+    run)            require_iterm; run_loop; return $? ;;
+  esac
+
+  # No subcommand.
+  if [ "$OPT_FORCE_MENU" -eq 1 ]; then
+    cmd_menu; return $?
+  fi
+  # Bare invocation on a terminal opens the menu; anything else just runs.
+  if [ "$SAW_ARGS" -eq 0 ] && [ "$OPT_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+    cmd_menu; return $?
+  fi
+  require_iterm
+  run_loop
+  return $?
+}
+
+# Allow tests to source the pure helpers without running anything.
+if [ -n "${CLAUDE_WAKER_LIB_ONLY:-}" ]; then
+  # Reached only when this file is sourced by the tests.
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
+fi
+
+main ${@+"$@"}

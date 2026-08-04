@@ -1,0 +1,252 @@
+.TH CLAUDE-WAKER 1 "2026-08-04" "claude-waker 0.1.0" "User Commands"
+.SH NAME
+claude\-waker \- keep Claude Code sessions in iTerm2 awake on a schedule
+.SH SYNOPSIS
+.B claude\-waker
+.RI [ command ]
+.RI [ options ]
+.SH DESCRIPTION
+.B claude\-waker
+periodically types a message into iTerm2 sessions whose name matches a pattern.
+It exists so that Claude Code sessions which have stopped and are waiting for
+input can be told to
+.B continue
+while you are away.
+.PP
+Run with no arguments on a terminal it presents an interactive menu. Given any
+flag or subcommand it runs non\-interactively, so it is equally at home in a
+script or a cron entry. The subcommand may appear before or after the flags.
+.PP
+It talks to iTerm2 through
+.BR osascript (1)
+and has no other dependencies. It will not launch iTerm2; if iTerm2 is not
+running it exits 3.
+.SH COMMANDS
+.TP
+.B run
+Run the wake loop.
+.TP
+.B menu
+Force the interactive menu.
+.TP
+.B list
+List the current iTerm2 sessions with their tty and state.
+.TP
+.B status
+Show the resolved settings and which sessions currently match, then exit
+without sending anything.
+.TP
+.B install\-plugin
+Install a "Claude Waker" entry into iTerm2's Scripts menu.
+.TP
+.B config
+Show the config file path and the effective settings.
+.TP
+.B version ", " help
+Print the version or the usage summary.
+.SH TARGETING
+.TP
+.BR \-m ", " \-\-match " " \fIPATTERN\fR
+Match sessions by name. Default
+.BR dev3 .
+Because the default mode is a substring match, this keeps working as Claude Code
+rewrites the session title.
+.TP
+.BR \-M ", " \-\-match\-mode " " \fIMODE\fR
+One of
+.BR contains " (default), " exact ", " glob ", " regex .
+.TP
+.BR \-i ", " \-\-ignore\-case
+Match case\-insensitively.
+.TP
+.BR \-\-session\-id " " \fIUUID\fR
+Target one exact session. Repeatable. Survives renames.
+.TP
+.BR \-\-tty " " \fIDEV\fR
+Target by tty. Repeatable.
+.TP
+.BR \-a ", " \-\-all
+Target every session.
+.TP
+.BR \-\-exclude " " \fIPATTERN\fR
+Skip sessions whose name contains \fIPATTERN\fR. Repeatable.
+.TP
+.B \-\-first
+Only the first match.
+.TP
+.B \-\-require\-match
+Exit non\-zero instead of warning when nothing matches.
+.TP
+.BR \-\-max\-targets " " \fIN\fR
+Refuse to run if more than \fIN\fR sessions match.
+.SH MESSAGE
+.TP
+.BR \-t ", " \-\-text " " \fISTR\fR
+The text to type. Default
+.BR continue .
+Repeat the flag to rotate between several messages across iterations.
+.TP
+.BR \-\-text\-file " " \fIFILE\fR
+Read the message from a file.
+.TP
+.B \-\-no\-newline
+Type the text without pressing Enter.
+.TP
+.B \-\-esc\-first
+Send Escape before the text, clearing any half\-typed line.
+.PP
+The message is passed to AppleScript as an argument rather than interpolated
+into the script source, so quotes, backslashes and
+.B $(...)
+arrive verbatim and are never evaluated.
+.SH SCHEDULE
+.TP
+.BR \-n ", " \-\-count " " \fIN\fR
+How many sends. Default 16.
+.B 0
+means no limit.
+.TP
+.B \-\-forever
+Same as
+.BR "\-\-count 0" .
+.TP
+.BR \-e ", " \-\-every " " \fIDUR\fR
+Gap between sends. Default
+.BR 45m .
+.TP
+.BR \-\-jitter " " \fIDUR\fR|\fIN\fB%\fR
+Randomise each gap by plus or minus this much.
+.TP
+.BR \-\-delay " " \fIDUR\fR
+Wait before the first send.
+.TP
+.BR \-\-at " " \fIHH:MM\fR
+Make the first send at a wall\-clock time.
+.TP
+.BR \-\-until " " \fIHH:MM\fR
+Stop sending after this time.
+.TP
+.BR \-\-deadline " " \fIDUR\fR
+Stop after this much elapsed time.
+.TP
+.B \-\-legacy\-timing
+Reproduce the asymmetric sleep of the original shell loop, which slept only for
+the first half of its iterations.
+.PP
+Durations are plain seconds
+.RB ( 2700 )
+or unit strings:
+.BR 90s ", " 45m ", " 1h30m ", " 2d .
+There are \fIN\-1\fR waits for \fIN\fR sends; nothing sleeps after the last one.
+.SH GUARDS
+.TP
+.B \-\-if\-idle
+Skip sessions that are streaming output at that moment. This maps onto iTerm2's
+.B is processing
+property, which is true while Claude is producing an answer and false while it
+waits for input. Note that a session blocked on a silent command, such as
+.BR sleep ,
+also reads as idle because nothing is being written to the terminal.
+.TP
+.B \-\-if\-prompt
+Only send when the session is at a shell prompt. Requires iTerm2 shell
+integration; without it no session appears to be at a prompt.
+.TP
+.B \-\-stop\-if\-gone
+Exit when a targeted session disappears.
+.SH OUTPUT
+.TP
+.BR \-d ", " \-\-dry\-run
+Print what would happen and send nothing. Waits are not actually slept.
+.TP
+.BR \-q ", " \-\-quiet
+Errors only.
+.TP
+.BR \-v ", " \-\-verbose
+Extra detail, including session ids in
+.BR list .
+.TP
+.BR \-\-log " " \fIFILE\fR
+Append a timestamped record of every send.
+.TP
+.B \-\-notify
+Post a macOS notification on each wake.
+.TP
+.BR \-\-countdown ", " \-\-no\-countdown
+Force the live countdown on or off. It is on by default on a terminal.
+.TP
+.B \-\-print\-cmd
+Print the equivalent command line and exit.
+.TP
+.BR \-y ", " \-\-yes
+Never prompt; skip the menu.
+.SH INTERACTIVE KEYS
+While the countdown is running:
+.BR s
+send now,
+.BR p
+pause or resume,
+.BR +
+and
+.BR \-
+shift the next wake by five minutes,
+.BR q
+quit. Ctrl\-C exits cleanly and reports how many wakes were delivered.
+.SH CONFIGURATION
+.I $XDG_CONFIG_HOME/claude\-waker/config
+or
+.IR ~/.config/claude\-waker/config .
+Simple
+.I key = value
+lines, with optional
+.BI [profile: name ]
+sections selected by
+.BR \-p .
+Profiles layer on top of the top\-level keys.
+.PP
+Precedence is flags, then profile, then top\-level config, then built\-in
+defaults. The file is parsed against a whitelist of known keys; it is never
+sourced or evaluated, so it cannot execute code.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Runtime error.
+.TP
+.B 2
+Usage error.
+.TP
+.B 3
+iTerm2 is not running.
+.TP
+.B 4
+Nothing matched, or a guard stopped the run.
+.SH EXAMPLES
+.TP
+Reproduce the original loop, with the sleep bug fixed:
+.B claude\-waker run
+.TP
+Every session that is not mid\-answer, indefinitely:
+.B claude\-waker run \-a \-\-if\-idle \-\-forever \-e 30m
+.TP
+Rehearse without sending:
+.B claude\-waker run \-m dev3 \-\-dry\-run
+.TP
+See what is out there:
+.B claude\-waker list
+.SH FILES
+.TP
+.I ~/.config/claude-waker/config
+Configuration file.
+.TP
+.I ~/Library/Application Support/iTerm2/Scripts/Claude Waker.py
+Installed by
+.BR "claude\-waker install\-plugin" .
+.SH SEE ALSO
+.BR osascript (1)
+.PP
+https://github.com/vali\-m/iterm2\-claude\-waker
+.SH AUTHOR
+Valentin Marginean

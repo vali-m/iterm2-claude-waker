@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: Lint
+        run: shellcheck bin/claude-waker install.sh test/run.sh test/fake-osascript
+
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash version
+        run: /bin/bash --version | head -1
+
+      # The script targets the bash macOS actually ships (3.2), not the
+      # newer one Homebrew may have on PATH.
+      - name: Test under /bin/bash (3.2)
+        run: /bin/bash ./test/run.sh
+
+      - name: Test under the default bash
+        run: bash ./test/run.sh
+
+  man:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # macOS ships BSD man, which has no --warnings. mandoc is the linter here.
+      - name: Man page lints clean
+        run: |
+          mandoc -T lint man/claude-waker.1 | tee man.lint
+          if [ -s man.lint ]; then echo "::error::mandoc reported issues"; exit 1; fi
+
+      - name: Man page renders
+        run: man -P cat man/claude-waker.1 >/dev/null
+
+  formula:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Formula syntax
+        run: ruby -c Formula/claude-waker.rb

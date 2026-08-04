@@ -1,0 +1,71 @@
+#compdef claude-waker
+# zsh completion for claude-waker
+
+_claude_waker_sessions() {
+  local -a names
+  names=( ${(f)"$(claude-waker list --no-color 2>/dev/null | tail -n +2 | sed 's/^ *[0-9]* *[^ ]* *[^ ]* *//')"} )
+  _describe -t sessions 'iTerm2 session' names
+}
+
+_claude_waker() {
+  local -a commands
+  commands=(
+    'run:run the wake loop'
+    'menu:interactive menu'
+    'list:list iTerm2 sessions'
+    'status:show what would be targeted'
+    'install-plugin:add to the iTerm2 Scripts menu'
+    'config:show config path and settings'
+    'version:print the version'
+    'help:show help'
+  )
+
+  _arguments -s -S \
+    '(-m --match)'{-m,--match}'[session name pattern]:pattern:_claude_waker_sessions' \
+    '(-M --match-mode)'{-M,--match-mode}'[how to match]:mode:(contains exact glob regex)' \
+    '(-i --ignore-case)'{-i,--ignore-case}'[case-insensitive matching]' \
+    '*--session-id[target an exact session id]:uuid:' \
+    '*--tty[target an exact tty]:tty:_files -W /dev -g "ttys*"' \
+    '(-a --all)'{-a,--all}'[target every session]' \
+    '*--exclude[skip sessions matching]:pattern:' \
+    '--first[only the first match]' \
+    '--require-match[exit non-zero if nothing matches]' \
+    '--max-targets[refuse if more than N match]:n:' \
+    '*'{-t,--text,--message}'[text to send]:text:' \
+    '--text-file[read text from a file]:file:_files' \
+    '--no-newline[do not press Enter]' \
+    '--esc-first[send Escape first]' \
+    '(-n --count)'{-n,--count}'[how many sends]:count:(1 4 8 16 32 0)' \
+    '--forever[send indefinitely]' \
+    '(-e --every --interval)'{-e,--every,--interval}'[interval]:duration:(30s 5m 15m 30m 45m 1h 1h30m 2h)' \
+    '--jitter[randomise the interval]:jitter:(5% 10% 25% 1m 5m)' \
+    '--delay[wait before the first send]:duration:' \
+    '--at[first send at HH:MM]:time:' \
+    '--until[stop after HH:MM]:time:' \
+    '--deadline[stop after this long]:duration:' \
+    '--legacy-timing[reproduce the original asymmetric sleep]' \
+    '--if-idle[skip sessions streaming output]' \
+    '--if-prompt[only send at a shell prompt]' \
+    '--stop-if-gone[exit if a target disappears]' \
+    '(-d --dry-run)'{-d,--dry-run}'[print, send nothing]' \
+    '(-q --quiet)'{-q,--quiet}'[errors only]' \
+    '(-v --verbose)'{-v,--verbose}'[extra detail]' \
+    '--log[append a timestamped log]:file:_files' \
+    '--notify[macOS notification per wake]' \
+    '(--countdown --no-countdown)'{--countdown,--no-countdown}'[live countdown]' \
+    '--no-color[disable colour]' \
+    '--print-cmd[print the equivalent command line]' \
+    '(-y --yes)'{-y,--yes}'[never prompt]' \
+    '(-c --config)'{-c,--config}'[alternate config file]:file:_files' \
+    '--no-config[ignore the config file]' \
+    '(-p --profile)'{-p,--profile}'[config profile]:profile:' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '(-V --version)'{-V,--version}'[show version]' \
+    '1: :->command'
+
+  case $state in
+    command) _describe -t commands 'claude-waker command' commands ;;
+  esac
+}
+
+_claude_waker "$@"

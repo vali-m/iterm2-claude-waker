@@ -1,0 +1,4 @@
+# The script targets macOS bash 3.2.
+shell=bash
+# `local x=$(cmd)` masking return values: we never branch on those assignments.
+disable=SC2155
