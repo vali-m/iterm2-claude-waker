@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [0.2.1] — 2026-08-04
+
+### Fixed
+
+- When the remembered session has since been closed, `claude-waker` now says so
+  and re-opens the picker. Previously it dropped you on a menu reading
+  "no match — nothing would be sent" with no hint that option 1 was the way out.
+  An explicit `--match` that matches nothing is still left alone — that is the
+  user's business, not a stale default.
+
 ## [0.2.0] — 2026-08-04
 
 Breaking: `--dry-run` is gone and `dev3` is no longer a default target.
@@ -85,7 +95,7 @@ First release. Grew out of a hardcoded `for i in {1..16}` shell loop that sent
 - `--dry-run`, `--log`, `--notify`, `--print-cmd`.
 - Man page, bash and zsh completions, Homebrew formula, `install.sh`, and an
   iTerm2 Scripts-menu entry.
-- 133 tests that run without iTerm2 by putting a fake `osascript` on `PATH`.
+- A test suite that runs without iTerm2 by putting a fake `osascript` on `PATH`.
 
 ### Fixed relative to the original script
 

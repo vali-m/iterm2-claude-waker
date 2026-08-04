@@ -45,7 +45,7 @@ git clone https://github.com/vali-m/homebrew-tap && cd homebrew-tap
 mkdir -p Formula
 cp ../iterm2-claude-waker/Formula/claude-waker.rb Formula/
 # set url + sha256 for the tagged release, then:
-git add . && git commit -m "claude-waker 0.1.0" && git push
+git add . && git commit -m "claude-waker <version>" && git push
 ```
 
 Verify before announcing it:

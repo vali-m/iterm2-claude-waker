@@ -201,6 +201,9 @@ claude-waker config              # show both paths and what is in effect
 A config file beats the remembered state, and flags beat both — so a hand-written config
 is never quietly overwritten by whatever you last happened to do.
 
+If the session you used last time has since been closed, `claude-waker` says so and asks
+you to pick again rather than sitting on a target that matches nothing.
+
 ## Config
 
 `~/.config/claude-waker/config`:
@@ -286,7 +289,7 @@ cp tldr/osx/claude-waker.md ~/.tldrc/tldr/pages/osx/    # tldr-c-client
 ## Development
 
 ```sh
-./test/run.sh              # 174 tests, no iTerm2 required
+./test/run.sh              # 178 tests, no iTerm2 required
 ./test/run.sh duration     # just the ones matching "duration"
 shellcheck bin/claude-waker
 ```

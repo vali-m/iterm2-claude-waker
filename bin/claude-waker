@@ -7,7 +7,7 @@
 
 set -uo pipefail
 
-CW_VERSION="0.2.0"
+CW_VERSION="0.2.1"
 CW_PROG="${0##*/}"
 
 # ---------------------------------------------------------------------------
@@ -54,6 +54,8 @@ OPT_NO_CONFIG=0
 
 MATCHES=()
 ARG_MATCHES=()
+ARG_ALL=0
+TARGET_FROM_STATE=0
 SESSION_IDS=()
 TTY_FILTERS=()
 EXCLUDES=()
@@ -532,7 +534,7 @@ load_state() {
     case "$line" in *=*) ;; *) continue ;; esac
     key="${line%%=*}"; val="${line#*=}"
     case "$key" in
-      match)      MATCHES[${#MATCHES[@]}]="$val" ;;
+      match)      MATCHES[${#MATCHES[@]}]="$val"; TARGET_FROM_STATE=1 ;;
       match_mode) OPT_MATCH_MODE="$val" ;;
       all)        OPT_ALL="$(bool01 "$val")" ;;
       text)       OPT_TEXT="$val" ;;
@@ -583,7 +585,7 @@ cmd_forget() {
 apply_config_kv() {
   local key="$1" val="$2"
   case "$key" in
-    match)          MATCHES[${#MATCHES[@]}]="$val" ;;
+    match)          MATCHES[${#MATCHES[@]}]="$val"; TARGET_FROM_STATE=0 ;;
     match_mode)     OPT_MATCH_MODE="$val" ;;
     ignore_case)    OPT_IGNORE_CASE=$(bool01 "$val") ;;
     text|message)   OPT_TEXT="$val" ;;
@@ -782,7 +784,7 @@ parse_args() {
       -i|--ignore-case)  OPT_IGNORE_CASE=1; shift ;;
       --session-id)      need_val "$1" $(( $# - 1 )); SESSION_IDS[${#SESSION_IDS[@]}]="$2"; shift 2 ;;
       --tty)             need_val "$1" $(( $# - 1 )); TTY_FILTERS[${#TTY_FILTERS[@]}]="$2"; shift 2 ;;
-      -a|--all)          OPT_ALL=1; shift ;;
+      -a|--all)          OPT_ALL=1; ARG_ALL=1; shift ;;
       --exclude)         need_val "$1" $(( $# - 1 )); EXCLUDES[${#EXCLUDES[@]}]="$2"; shift 2 ;;
       --first)           OPT_FIRST=1; shift ;;
       --require-match)   OPT_REQUIRE_MATCH=1; shift ;;
@@ -840,6 +842,10 @@ parse_args() {
 
   # Anything given on the command line replaces what config or the remembered
   # state supplied, instead of being ORed with it.
+  if [ "${#ARG_MATCHES[@]}" -gt 0 ] || [ "${#SESSION_IDS[@]}" -gt 0 ] \
+     || [ "${#TTY_FILTERS[@]}" -gt 0 ] || [ "$ARG_ALL" -eq 1 ]; then
+    TARGET_FROM_STATE=0
+  fi
   [ "${#ARG_MATCHES[@]}" -gt 0 ] && MATCHES=(${ARG_MATCHES[@]+"${ARG_MATCHES[@]}"})
   [ "${#TEXTS[@]}" -gt 0 ] && OPT_TEXT="${TEXTS[0]}"
   return 0
@@ -1315,9 +1321,13 @@ draw_menu() {
 cmd_menu() {
   require_iterm
   local reply tmp
-  # First run, or after `forget`: choose a target before showing the menu.
+  # First run, after `forget`, or when the remembered session has closed.
+  # The menu can always prompt, so it does not need the tty check ensure_target
+  # applies before blocking a non-interactive run.
   if ! have_target; then
     menu_target_picker || return 1
+  else
+    retarget_if_stale || return $?
   fi
   while :; do
     draw_menu
@@ -1549,17 +1559,38 @@ run_loop() {
 # ---------------------------------------------------------------------------
 
 # Nothing to target: on a terminal let the user pick, otherwise say what to do.
+can_ask() {
+  [ -t 0 ] && [ -t 1 ] && [ "$OPT_YES" -eq 0 ]
+}
+
+# The remembered session may have been closed since the last run. Ask again
+# rather than leaving the user on a menu that quietly matches nothing.
+retarget_if_stale() {
+  [ "$TARGET_FROM_STATE" -eq 1 ] || return 0
+  resolve_targets >/dev/null 2>&1
+  [ "${#TARGET_IDS[@]}" -gt 0 ] && return 0
+  say "${C_YELLOW}Last time you used $(describe_target), which no longer matches any open session.${C_RESET}"
+  menu_target_picker || return 4
+  return 0
+}
+
 ensure_target() {
-  have_target && return 0
-  if [ -t 0 ] && [ -t 1 ] && [ "$OPT_YES" -eq 0 ]; then
-    menu_target_picker || return 4
-    have_target && return 0
-    err "no target chosen"
-    return 4
+  if ! have_target; then
+    if can_ask; then
+      menu_target_picker || return 4
+      have_target && return 0
+      err "no target chosen"
+      return 4
+    fi
+    err "no target chosen. Pass --match PATTERN, --session-id ID, --tty DEV or --all,"
+    err "or run $CW_PROG on a terminal to pick from the open sessions."
+    return 2
   fi
-  err "no target chosen. Pass --match PATTERN, --session-id ID, --tty DEV or --all,"
-  err "or run $CW_PROG on a terminal to pick from the open sessions."
-  return 2
+
+  # Only a remembered target is second-guessed; an explicit --match that matches
+  # nothing is the user's business.
+  can_ask && { retarget_if_stale || return $?; }
+  return 0
 }
 
 main() {

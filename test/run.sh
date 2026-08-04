@@ -669,6 +669,36 @@ test_remember() {
   assert_exit 2 env HOME="$home" XDG_STATE_HOME="$home/state" "$WAKER" --no-color run
 }
 
+test_stale_target() {
+  local home="$SANDBOX/shome" out
+  mkdir -p "$home"
+  swaker() { HOME="$home" XDG_STATE_HOME="$home/state" "$WAKER" --no-color "$@" 2>&1; }
+
+  swaker run -m dev3 -n 1 -e 1s --no-countdown >/dev/null
+
+  # The tab you remembered has since been closed.
+  export CW_TEST_SESSIONS="$(printf 'id-9%ssomething-else%s/dev/ttys009%sfalse%sfalse%s' \
+    "$FS" "$FS" "$FS" "$FS" "$RS")"
+
+  out=$(printf 'q\n' | swaker menu)
+  it "stale: says the remembered session is gone"
+  assert_contains "$out" "no longer matches any open session"
+  it "stale: re-opens the picker";  assert_contains "$out" "Pick the session(s) to wake"
+
+  # An explicit --match that matches nothing is the user's business.
+  out=$(printf 'q\n' | swaker menu -m nomatch)
+  it "stale: an explicit --match is not second-guessed"
+  assert_not_contains "$out" "no longer matches any open session"
+
+  # A remembered target that still matches goes straight through.
+  export CW_TEST_SESSIONS="$(mk_sessions)"
+  out=$(printf 'q\n' | swaker menu)
+  it "stale: a live remembered target is left alone"
+  assert_not_contains "$out" "Pick the session(s) to wake"
+
+  export CW_TEST_SESSIONS="$(mk_sessions)"
+}
+
 test_flag_order() {
   local out
   out=$(waker list)
@@ -704,6 +734,7 @@ run_test "cli surface"      test_cli_surface
 run_test "multi match"      test_multi_match
 run_test "no default target" test_no_default_target
 run_test "remember"         test_remember
+run_test "stale target"     test_stale_target
 run_test "no hangs"         test_no_hangs
 run_test "install plugin"   test_install_plugin
 run_test "flag order"       test_flag_order
