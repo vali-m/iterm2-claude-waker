@@ -6,7 +6,7 @@ class ClaudeWaker < Formula
   desc "Keep Claude Code sessions in iTerm2 awake on a schedule"
   homepage "https://github.com/vali-m/iterm2-claude-waker"
   url "https://github.com/vali-m/iterm2-claude-waker/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "PENDING"
+  sha256 "c7ee9cc861df8123b12a7b2f287b9b58a77b336a32bdf7213d922256cc063a27"
   license "MIT"
   head "https://github.com/vali-m/iterm2-claude-waker.git", branch: "main"
 
