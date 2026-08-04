@@ -19,7 +19,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       sha256: ${{ steps.meta.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve tag
         id: meta
@@ -86,7 +86,7 @@ jobs:
             echo "TAP_TOKEN not set — update the tap by hand (see RELEASING.md)."
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.gate.outputs.ok == 'true'
         with:
           repository: vali-m/homebrew-tap

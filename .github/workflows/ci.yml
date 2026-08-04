@@ -10,7 +10,7 @@ jobs:
   shellcheck:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install shellcheck
         run: brew install shellcheck
       - name: Lint
@@ -19,7 +19,7 @@ jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: bash version
         run: /bin/bash --version | head -1
@@ -35,7 +35,7 @@ jobs:
   man:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # macOS ships BSD man, which has no --warnings. mandoc is the linter here.
       - name: Man page lints clean
         run: |
@@ -48,6 +48,6 @@ jobs:
   formula:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Formula syntax
         run: ruby -c Formula/claude-waker.rb
