@@ -204,6 +204,21 @@ reproduces it exactly, and there's a test pinning both schedules.
 
 It will not launch iTerm2 for you. If iTerm2 is closed it says so and exits 3.
 
+## tldr page
+
+A [tldr-pages](https://github.com/tldr-pages/tldr) page lives at
+`tldr/osx/claude-waker.md`, in upstream's format and directory layout.
+
+It is not in the upstream repo: tldr-pages requires a project to have been maintained
+for at least a year unless it is notable, and this one is new. Until then, install it
+into your local cache:
+
+```sh
+cp tldr/osx/claude-waker.md ~/.tldrc/tldr/pages/osx/    # tldr-c-client
+```
+
+`tldr --update` re-clones the cache and will remove it, so re-copy after updating.
+
 ## Development
 
 ```sh

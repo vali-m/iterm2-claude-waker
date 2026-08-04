@@ -96,3 +96,12 @@ Files carrying the version number:
 
 CI fails the release if the script and the tag disagree, which catches the one that
 matters most.
+
+## tldr page
+
+`tldr/osx/claude-waker.md` is kept in upstream tldr-pages format so submitting it is a
+straight copy into `pages/osx/` of a tldr-pages fork.
+
+Do not submit yet. tldr-pages requires a project to have been maintained for **at least
+a year** unless the maintainers deem it notable. Revisit once the project clears that,
+and re-check the examples still match the CLI first.
