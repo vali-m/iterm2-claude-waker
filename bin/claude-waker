@@ -7,19 +7,17 @@
 
 set -uo pipefail
 
-CW_VERSION="0.1.2"
+CW_VERSION="0.2.0"
 CW_PROG="${0##*/}"
 
 # ---------------------------------------------------------------------------
 # Defaults (these reproduce the original shell loop)
 # ---------------------------------------------------------------------------
 
-DEF_MATCH="dev3"
 DEF_TEXT="continue"
 DEF_COUNT=16
 DEF_EVERY="45m"
 
-OPT_MATCH="$DEF_MATCH"
 OPT_MATCH_MODE="contains"
 OPT_IGNORE_CASE=0
 OPT_TEXT="$DEF_TEXT"
@@ -39,7 +37,6 @@ OPT_IF_PROMPT=0
 OPT_STOP_IF_GONE=0
 OPT_REQUIRE_MATCH=0
 OPT_MAX_TARGETS=0
-OPT_DRY_RUN=0
 OPT_QUIET=0
 OPT_VERBOSE=0
 OPT_LOG=""
@@ -51,9 +48,12 @@ OPT_YES=0
 OPT_PROFILE=""
 OPT_PRINT_CMD=0
 OPT_FORCE_MENU=0
+OPT_NO_REMEMBER=0
 OPT_CONFIG=""
 OPT_NO_CONFIG=0
 
+MATCHES=()
+ARG_MATCHES=()
 SESSION_IDS=()
 TTY_FILTERS=()
 EXCLUDES=()
@@ -379,6 +379,39 @@ EOF
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Turn a live session title into a pattern that survives the title changing.
+# Claude Code rewrites the title constantly (spinner glyph while it works, a
+# different marker while it waits) and iTerm2 appends the running job, so the
+# name you picked is rarely the name it has a minute later.
+#
+#   "\u2810 dev3"                  -> "dev3"
+#   "\u2733 Some long task (node)" -> "Some long task"
+#   "bash (sleep)"                  -> "bash"
+#
+# Leading whitespace-delimited tokens are dropped only when they contain no
+# letter or digit, so a real word is never eaten.
+stable_pattern_from_name() {
+  local name="$1" rest first out drops=0
+  rest="${name#"${name%%[![:space:]]*}"}"
+  while [ "$drops" -lt 2 ]; do
+    first="${rest%%[[:space:]]*}"
+    [ "$first" = "$rest" ] && break
+    case "$first" in
+      *[A-Za-z0-9]*) break ;;
+    esac
+    rest="${rest#"$first"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    drops=$(( drops + 1 ))
+  done
+  out="$rest"
+  case "$out" in
+    *\ \(*\)) out="${out% (*)}" ;;
+  esac
+  out="${out%"${out##*[![:space:]]}"}"
+  [ -n "$out" ] || out="$name"
+  printf '%s' "$out"
+}
+
 # In glob mode $pat is deliberately left unquoted -- globbing is the point.
 # shellcheck disable=SC2254
 name_matches() {
@@ -407,6 +440,23 @@ is_excluded() {
 # Resolve targets -> TARGET_IDS / TARGET_NAMES
 TARGET_IDS=(); TARGET_NAMES=()
 
+# True when the invocation already says what to target.
+have_target() {
+  [ "${#MATCHES[@]}" -gt 0 ] && return 0
+  [ "${#SESSION_IDS[@]}" -gt 0 ] && return 0
+  [ "${#TTY_FILTERS[@]}" -gt 0 ] && return 0
+  [ "$OPT_ALL" -eq 1 ] && return 0
+  return 1
+}
+
+any_match() {
+  local name="$1" pat
+  for pat in ${MATCHES[@]+"${MATCHES[@]}"}; do
+    name_matches "$name" "$pat" && return 0
+  done
+  return 1
+}
+
 resolve_targets() {
   local i n=0 want
   TARGET_IDS=(); TARGET_NAMES=()
@@ -426,7 +476,7 @@ resolve_targets() {
     elif [ "$OPT_ALL" -eq 1 ]; then
       take=1
     else
-      name_matches "$name" "$OPT_MATCH" && take=1
+      any_match "$name" && take=1
     fi
     if [ "$take" -eq 1 ] && is_excluded "$name"; then take=0; fi
     if [ "$take" -eq 1 ]; then
@@ -440,14 +490,20 @@ resolve_targets() {
 }
 
 describe_target() {
+  local pat out=""
   if [ "${#SESSION_IDS[@]}" -gt 0 ]; then
     printf '%s session id(s)' "${#SESSION_IDS[@]}"
   elif [ "${#TTY_FILTERS[@]}" -gt 0 ]; then
     printf 'tty %s' "$(printf '%s ' ${TTY_FILTERS[@]+"${TTY_FILTERS[@]}"})"
   elif [ "$OPT_ALL" -eq 1 ]; then
     printf 'all sessions'
+  elif [ "${#MATCHES[@]}" -gt 0 ]; then
+    for pat in ${MATCHES[@]+"${MATCHES[@]}"}; do
+      out="${out:+$out or }\"$pat\""
+    done
+    printf '%s %s' "$OPT_MATCH_MODE" "$out"
   else
-    printf '%s "%s"' "$OPT_MATCH_MODE" "$OPT_MATCH"
+    printf 'nothing chosen yet'
   fi
 }
 
@@ -460,11 +516,74 @@ config_path() {
   printf '%s/claude-waker/config\n' "${XDG_CONFIG_HOME:-$HOME/.config}"
 }
 
+state_path() {
+  printf '%s/claude-waker/state\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+# Remembered choices from the last run. Config beats state and flags beat both,
+# so a hand-written config is never overridden by whatever you last did.
+load_state() {
+  local file line key val
+  [ "$OPT_NO_CONFIG" -eq 1 ] && return 0
+  file=$(state_path)
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in
+      match)      MATCHES[${#MATCHES[@]}]="$val" ;;
+      match_mode) OPT_MATCH_MODE="$val" ;;
+      all)        OPT_ALL="$(bool01 "$val")" ;;
+      text)       OPT_TEXT="$val" ;;
+      count)      OPT_COUNT="$val" ;;
+      every)      OPT_EVERY="$val" ;;
+      if_idle)    OPT_IF_IDLE="$(bool01 "$val")" ;;
+      if_prompt)  OPT_IF_PROMPT="$(bool01 "$val")" ;;
+      jitter)     OPT_JITTER="$val" ;;
+    esac
+  done <"$file"
+  return 0
+}
+
+save_state() {
+  local file dir pat
+  [ "$OPT_NO_CONFIG" -eq 1 ] && return 0
+  [ "$OPT_NO_REMEMBER" -eq 1 ] && return 0
+  file=$(state_path); dir="${file%/*}"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  {
+    printf '# written by claude-waker; "claude-waker forget" clears it\n'
+    for pat in ${MATCHES[@]+"${MATCHES[@]}"}; do
+      printf 'match=%s\n' "$pat"
+    done
+    printf 'match_mode=%s\n' "$OPT_MATCH_MODE"
+    printf 'all=%s\n' "$OPT_ALL"
+    printf 'text=%s\n' "$OPT_TEXT"
+    printf 'count=%s\n' "$OPT_COUNT"
+    printf 'every=%s\n' "$OPT_EVERY"
+    printf 'if_idle=%s\n' "$OPT_IF_IDLE"
+    printf 'if_prompt=%s\n' "$OPT_IF_PROMPT"
+    printf 'jitter=%s\n' "$OPT_JITTER"
+  } >"$file" 2>/dev/null || return 0
+  return 0
+}
+
+cmd_forget() {
+  local file; file=$(state_path)
+  if [ -e "$file" ]; then
+    rm -f "$file" && say "Forgot remembered choices ($file)."
+  else
+    say "Nothing remembered yet."
+  fi
+  return 0
+}
+
 # Values are assigned through a whitelist; the file is never sourced or eval'd.
 apply_config_kv() {
   local key="$1" val="$2"
   case "$key" in
-    match)          OPT_MATCH="$val" ;;
+    match)          MATCHES[${#MATCHES[@]}]="$val" ;;
     match_mode)     OPT_MATCH_MODE="$val" ;;
     ignore_case)    OPT_IGNORE_CASE=$(bool01 "$val") ;;
     text|message)   OPT_TEXT="$val" ;;
@@ -551,7 +670,7 @@ usage() {
 ${C_BOLD}claude-waker${C_RESET} ${CW_VERSION} — keep Claude Code sessions in iTerm2 awake.
 
 ${C_BOLD}USAGE${C_RESET}
-  $CW_PROG                        interactive menu (prefilled from config)
+  $CW_PROG                        pick a session, then the interactive menu
   $CW_PROG run [options]          run the wake loop
   $CW_PROG <command> [options]
 
@@ -561,11 +680,14 @@ ${C_BOLD}COMMANDS${C_RESET}
   list             list iTerm2 sessions
   status           show resolved settings and current matches, then exit
   install-plugin   add "Claude Waker" to iTerm2's Scripts menu
-  config           show config file path and current values
+  config           show config/state paths and current values
+  forget           clear the remembered choices
   version, help
 
 ${C_BOLD}TARGETING${C_RESET}
-  -m, --match PATTERN       session name to match (default: $DEF_MATCH)
+  -m, --match PATTERN       session name to match; repeatable, any may match.
+                            With no target at all, $CW_PROG asks you to pick
+                            one from the sessions currently open in iTerm2.
   -M, --match-mode MODE     contains | exact | glob | regex (default: contains)
   -i, --ignore-case         case-insensitive matching
       --session-id UUID     target an exact session id (repeatable)
@@ -603,7 +725,6 @@ ${C_BOLD}GUARDS${C_RESET}
       --stop-if-gone        exit if a targeted session disappears
 
 ${C_BOLD}OUTPUT${C_RESET}
-  -d, --dry-run             print what would happen; send nothing
   -q, --quiet               errors only
   -v, --verbose             extra detail
       --log FILE            append a timestamped log
@@ -611,18 +732,27 @@ ${C_BOLD}OUTPUT${C_RESET}
       --countdown / --no-countdown
       --no-color
       --print-cmd           print the equivalent command line and exit
-  -y, --yes                 never prompt; skip the menu
+  -y, --yes                 never prompt; skip the menu and the picker
+      --no-remember         do not save these choices for next time
   -c, --config FILE         use an alternate config file
       --no-config           ignore the config file
   -p, --profile NAME        use a [profile:NAME] section from the config
+
+${C_BOLD}REMEMBERING${C_RESET}
+  Whatever you last ran with is saved to
+    \${XDG_STATE_HOME:-~/.local/state}/claude-waker/state
+  and used as the default next time, so a bare \`$CW_PROG\` picks up where you
+  left off. A config file still wins over it, and flags win over both.
+  \`$CW_PROG forget\` clears it; --no-remember skips saving.
 
 ${C_BOLD}DURATIONS${C_RESET}
   Plain seconds (2700) or units: 90s, 45m, 1h30m, 2d.
 
 ${C_BOLD}EXAMPLES${C_RESET}
-  $CW_PROG                                    # menu, ready to go
-  $CW_PROG run                                # the original loop, fixed timing
+  $CW_PROG                                    # pick a session, then the menu
+  $CW_PROG run                                # repeat what you last did
   $CW_PROG run -m dev3 -n 16 -e 45m           # explicit
+  $CW_PROG run -m dev3 -m dev4                # either session
   $CW_PROG run -a --if-idle -t continue       # every idle session
   $CW_PROG run -m dev --forever -e 30m --jitter 10%
   $CW_PROG list
@@ -647,7 +777,7 @@ parse_args() {
     _last_argc=$#
     SAW_ARGS=1
     case "$1" in
-      -m|--match)        need_val "$1" $(( $# - 1 )); OPT_MATCH="$2"; shift 2 ;;
+      -m|--match)        need_val "$1" $(( $# - 1 )); ARG_MATCHES[${#ARG_MATCHES[@]}]="$2"; shift 2 ;;
       -M|--match-mode)   need_val "$1" $(( $# - 1 )); OPT_MATCH_MODE="$2"; shift 2 ;;
       -i|--ignore-case)  OPT_IGNORE_CASE=1; shift ;;
       --session-id)      need_val "$1" $(( $# - 1 )); SESSION_IDS[${#SESSION_IDS[@]}]="$2"; shift 2 ;;
@@ -680,7 +810,6 @@ parse_args() {
       --if-prompt)       OPT_IF_PROMPT=1; shift ;;
       --stop-if-gone)    OPT_STOP_IF_GONE=1; shift ;;
 
-      -d|--dry-run)      OPT_DRY_RUN=1; shift ;;
       -q|--quiet)        OPT_QUIET=1; shift ;;
       -v|--verbose)      OPT_VERBOSE=1; shift ;;
       --log)             need_val "$1" $(( $# - 1 )); OPT_LOG="$2"; shift 2 ;;
@@ -691,6 +820,7 @@ parse_args() {
       --color)           OPT_COLOR=1; shift ;;
       --print-cmd)       OPT_PRINT_CMD=1; shift ;;
       -y|--yes)          OPT_YES=1; shift ;;
+      --no-remember)     OPT_NO_REMEMBER=1; shift ;;
       --menu)            OPT_FORCE_MENU=1; shift ;;
 
       # Values already read by prescan_config_args; still validated here so a
@@ -708,6 +838,9 @@ parse_args() {
     esac
   done
 
+  # Anything given on the command line replaces what config or the remembered
+  # state supplied, instead of being ORed with it.
+  [ "${#ARG_MATCHES[@]}" -gt 0 ] && MATCHES=(${ARG_MATCHES[@]+"${ARG_MATCHES[@]}"})
   [ "${#TEXTS[@]}" -gt 0 ] && OPT_TEXT="${TEXTS[0]}"
   return 0
 }
@@ -736,7 +869,7 @@ extract_subcommand() {
   for a in ${@+"$@"}; do
     if [ "$found" -eq 0 ] && ! is_value_flag "$prev"; then
       case "$a" in
-        run|menu|list|status|install-plugin|config|version|help)
+        run|menu|list|status|install-plugin|config|forget|version|help)
           CW_CMD="$a"; found=1; prev="$a"; continue ;;
       esac
     fi
@@ -832,7 +965,10 @@ equivalent_cmd() {
   elif [ "$OPT_ALL" -eq 1 ]; then
     out="$out --all"
   else
-    out="$out -m $(shq "$OPT_MATCH")"
+    local pat
+    for pat in ${MATCHES[@]+"${MATCHES[@]}"}; do
+      out="$out -m $(shq "$pat")"
+    done
     [ "$OPT_MATCH_MODE" != "contains" ] && out="$out -M $OPT_MATCH_MODE"
   fi
   [ "$OPT_IGNORE_CASE" -eq 1 ] && out="$out -i"
@@ -932,11 +1068,12 @@ guards_desc() {
 }
 
 cmd_config() {
-  local f; f=$(config_path)
-  say "${C_BOLD}Config file${C_RESET}  $f$( [ -r "$f" ] || printf ' %s(not present)%s' "$C_DIM" "$C_RESET")"
+  local f st; f=$(config_path); st=$(state_path)
+  say "${C_BOLD}Config file${C_RESET}   $f$( [ -r "$f" ] || printf ' %s(not present)%s' "$C_DIM" "$C_RESET")"
+  say "${C_BOLD}Remembered${C_RESET}    $st$( [ -r "$st" ] || printf ' %s(nothing remembered)%s' "$C_DIM" "$C_RESET")"
   say ""
   say "${C_BOLD}Effective settings${C_RESET}"
-  say "  match         $OPT_MATCH"
+  say "  target        $(describe_target)"
   say "  match_mode    $OPT_MATCH_MODE"
   say "  text          $OPT_TEXT"
   say "  count         $OPT_COUNT"
@@ -1025,7 +1162,11 @@ menu_prompt() {
 
 menu_target_picker() {
   load_sessions || { warn "could not query iTerm2"; return 1; }
-  printf '\n%sPick target sessions%s\n\n' "$C_BOLD" "$C_RESET"
+  if [ "${#S_IDS[@]}" -eq 0 ]; then
+    warn "no iTerm2 sessions found"
+    return 1
+  fi
+  printf '\n%sPick the session(s) to wake%s\n\n' "$C_BOLD" "$C_RESET"
   local i=0
   while [ "$i" -lt "${#S_IDS[@]}" ]; do
     printf '  %s%2d%s) %-9s %s\n' "$C_CYAN" "$(( i + 1 ))" "$C_RESET" \
@@ -1043,7 +1184,7 @@ menu_target_picker() {
 
   case "$reply" in
     *[!0-9,\ -]*)
-      OPT_ALL=0; SESSION_IDS=(); OPT_MATCH="$reply"
+      OPT_ALL=0; SESSION_IDS=(); MATCHES=("$reply")
       return 0
       ;;
   esac
@@ -1070,14 +1211,33 @@ menu_target_picker() {
     esac
   done
 
-  SESSION_IDS=(); OPT_ALL=0
+  # A pick becomes a name pattern, not a session id: ids die with the tab, and
+  # the title changes constantly while Claude works.
+  SESSION_IDS=(); OPT_ALL=0; MATCHES=()
+  local derived
   for n in ${picked[@]+"${picked[@]}"}; do
     if [ "$n" -ge 1 ] && [ "$n" -le "${#S_IDS[@]}" ]; then
-      SESSION_IDS[${#SESSION_IDS[@]}]="${S_IDS[$(( n - 1 ))]}"
+      derived=$(stable_pattern_from_name "${S_NAMES[$(( n - 1 ))]}")
+      MATCHES[${#MATCHES[@]}]="$derived"
     else
       warn "ignoring out-of-range selection: $n"
     fi
   done
+
+  [ "${#MATCHES[@]}" -gt 0 ] || return 0
+
+  printf '\n'
+  for derived in ${MATCHES[@]+"${MATCHES[@]}"}; do
+    printf '  %swill match%s any session whose name contains %s%s%s\n' \
+      "$C_DIM" "$C_RESET" "$C_BOLD" "$derived" "$C_RESET"
+  done
+
+  if [ "${#MATCHES[@]}" -eq 1 ]; then
+    local edited="${MATCHES[0]}"
+    printf '\n'
+    menu_prompt edited "  press Enter to accept, or type a different pattern:" "${MATCHES[0]}"
+    MATCHES=("$edited")
+  fi
   return 0
 }
 
@@ -1146,8 +1306,8 @@ draw_menu() {
   printf '\n'
   printf ' %s1%s) target   %s2%s) message   %s3%s) repeats   %s4%s) interval\n' \
     "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
-  printf ' %s5%s) guards   %s6%s) dry run   %s7%s) show equivalent command\n' \
-    "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf ' %s5%s) guards   %s6%s) show equivalent command\n' \
+    "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
   printf ' %ss%s) start    %sq%s) quit\n' "$C_GREEN" "$C_RESET" "$C_CYAN" "$C_RESET"
   printf '\n%s>%s ' "$C_CYAN" "$C_RESET"
 }
@@ -1155,6 +1315,10 @@ draw_menu() {
 cmd_menu() {
   require_iterm
   local reply tmp
+  # First run, or after `forget`: choose a target before showing the menu.
+  if ! have_target; then
+    menu_target_picker || return 1
+  fi
   while :; do
     draw_menu
     IFS= read -r reply || { printf '\n'; return 0; }
@@ -1180,18 +1344,18 @@ cmd_menu() {
          fi
          ;;
       5) menu_guards ;;
-      6) OPT_DRY_RUN=1
-         printf '\n'
-         run_loop
-         OPT_DRY_RUN=0
-         printf '\n%sPress Enter to return to the menu.%s' "$C_DIM" "$C_RESET"
-         IFS= read -r tmp
-         ;;
-      7) printf '\n  %s%s%s\n\n' "$C_BOLD" "$(equivalent_cmd)" "$C_RESET"
+      6) printf '\n  %s%s%s\n\n' "$C_BOLD" "$(equivalent_cmd)" "$C_RESET"
          printf '%sPress Enter to return to the menu.%s' "$C_DIM" "$C_RESET"
          IFS= read -r tmp
          ;;
-      s|S|"") printf '\n'; run_loop; return $? ;;
+      s|S|"")
+         if ! have_target; then
+           warn "pick a target first (option 1)"
+           sleep 1
+           continue
+         fi
+         printf '\n'; run_loop; return $?
+         ;;
       q|Q) printf '\n'; return 0 ;;
       *) ;;
     esac
@@ -1207,11 +1371,6 @@ cmd_menu() {
 wait_interval() {
   local secs="$1" next_label="$2"
   local end now remaining key paused=0 interactive=0 countdown=0
-
-  if [ "$OPT_DRY_RUN" -eq 1 ]; then
-    say "       ${C_DIM}would wait $(fmt_duration "$secs")${C_RESET}"
-    return 0
-  fi
 
   [ "$OPT_COUNTDOWN" -eq 1 ] && countdown=1
   [ "$OPT_COUNTDOWN" -eq -1 ] && [ -t 1 ] && [ "$OPT_QUIET" -eq 0 ] && countdown=1
@@ -1274,16 +1433,6 @@ do_send() {
     return 3
   fi
 
-  if [ "$OPT_DRY_RUN" -eq 1 ]; then
-    local i=0
-    while [ "$i" -lt "${#TARGET_IDS[@]}" ]; do
-      say "  ${C_DIM}would send${C_RESET} \"$msg\" ${C_DIM}→${C_RESET} ${TARGET_NAMES[$i]}"
-      i=$(( i + 1 ))
-    done
-    SENT_TOTAL=$(( SENT_TOTAL + 1 ))
-    return 0
-  fi
-
   raw=$(as_send "$msg" "$OPT_NEWLINE" "$OPT_ESC_FIRST" "$OPT_IF_IDLE" "$OPT_IF_PROMPT" \
         ${TARGET_IDS[@]+"${TARGET_IDS[@]}"} 2>/dev/null) || {
     warn "osascript failed while sending"
@@ -1322,9 +1471,7 @@ EOF
 run_loop() {
   local i msg wait_secs next_label rc
 
-  if [ "$OPT_DRY_RUN" -eq 1 ]; then
-    say "${C_BOLD}Dry run${C_RESET} ${C_DIM}— nothing will be sent${C_RESET}"
-  fi
+  save_state
 
   if [ "$DELAY_SECS" -gt 0 ]; then
     next_label=$(date -v "+${DELAY_SECS}S" '+%H:%M:%S' 2>/dev/null || printf '?')
@@ -1401,12 +1548,27 @@ run_loop() {
 # Entry point
 # ---------------------------------------------------------------------------
 
+# Nothing to target: on a terminal let the user pick, otherwise say what to do.
+ensure_target() {
+  have_target && return 0
+  if [ -t 0 ] && [ -t 1 ] && [ "$OPT_YES" -eq 0 ]; then
+    menu_target_picker || return 4
+    have_target && return 0
+    err "no target chosen"
+    return 4
+  fi
+  err "no target chosen. Pass --match PATTERN, --session-id ID, --tty DEV or --all,"
+  err "or run $CW_PROG on a terminal to pick from the open sessions."
+  return 2
+}
+
 main() {
   extract_subcommand ${@+"$@"}
   local cmd="$CW_CMD"
   set -- ${CW_ARGV[@]+"${CW_ARGV[@]}"}
 
   prescan_config_args ${@+"$@"}
+  load_state
   load_config
   parse_args ${@+"$@"}
   setup_color
@@ -1426,11 +1588,16 @@ main() {
     list)           cmd_list; return $? ;;
     status)         cmd_status; return $? ;;
     config)         cmd_config; return $? ;;
+    forget)         cmd_forget; return $? ;;
     install-plugin) cmd_install_plugin; return $? ;;
     version)        print_version; return 0 ;;
     help)           usage; return 0 ;;
     menu)           cmd_menu; return $? ;;
-    run)            require_iterm; run_loop; return $? ;;
+    run)
+      require_iterm
+      ensure_target || return $?
+      run_loop; return $?
+      ;;
   esac
 
   # No subcommand.
@@ -1442,6 +1609,7 @@ main() {
     cmd_menu; return $?
   fi
   require_iterm
+  ensure_target || return $?
   run_loop
   return $?
 }

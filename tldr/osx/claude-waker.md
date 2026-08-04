@@ -3,9 +3,13 @@
 > Keep Claude Code sessions in iTerm2 awake by typing a message into them on a schedule.
 > More information: <https://github.com/vali-m/iterm2-claude-waker>.
 
-- Start the interactive menu:
+- Pick a session from those open in iTerm2, then configure and start:
 
 `claude-waker`
+
+- Repeat whatever was last run:
+
+`claude-waker run`
 
 - List the current iTerm2 sessions and their state:
 
@@ -23,13 +27,9 @@
 
 `claude-waker run --all --if-idle --forever --text "{{keep going}}"`
 
-- Rehearse a run without sending anything:
+- Clear the remembered choices:
 
-`claude-waker run --match {{dev3}} --dry-run`
-
-- Print the equivalent command line for the current settings:
-
-`claude-waker run --match {{dev3}} --count {{16}} --print-cmd`
+`claude-waker forget`
 
 - Add a "Claude Waker" entry to iTerm2's Scripts menu:
 

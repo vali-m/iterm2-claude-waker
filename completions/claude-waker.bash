@@ -6,15 +6,15 @@ _claude_waker() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  cmds="run menu list status install-plugin config version help"
+  cmds="run menu list status install-plugin config forget version help"
   modes="contains exact glob regex"
   opts="--match --match-mode --ignore-case --session-id --tty --all --exclude
         --first --require-match --max-targets --text --message --text-file
         --no-newline --newline --esc-first --count --forever --every --interval
         --jitter --delay --start-in --at --until --deadline --legacy-timing
-        --if-idle --if-prompt --stop-if-gone --dry-run --quiet --verbose --log
+        --if-idle --if-prompt --stop-if-gone --quiet --verbose --log
         --notify --countdown --no-countdown --no-color --color --print-cmd
-        --yes --menu --config --no-config --profile --help --version"
+        --yes --no-remember --menu --config --no-config --profile --help --version"
 
   case "$prev" in
     -M|--match-mode)

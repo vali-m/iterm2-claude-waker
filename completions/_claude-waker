@@ -15,13 +15,14 @@ _claude_waker() {
     'list:list iTerm2 sessions'
     'status:show what would be targeted'
     'install-plugin:add to the iTerm2 Scripts menu'
-    'config:show config path and settings'
+    'config:show config and state paths'
+    'forget:clear the remembered choices'
     'version:print the version'
     'help:show help'
   )
 
   _arguments -s -S \
-    '(-m --match)'{-m,--match}'[session name pattern]:pattern:_claude_waker_sessions' \
+    '*'{-m,--match}'[session name pattern]:pattern:_claude_waker_sessions' \
     '(-M --match-mode)'{-M,--match-mode}'[how to match]:mode:(contains exact glob regex)' \
     '(-i --ignore-case)'{-i,--ignore-case}'[case-insensitive matching]' \
     '*--session-id[target an exact session id]:uuid:' \
@@ -47,7 +48,6 @@ _claude_waker() {
     '--if-idle[skip sessions streaming output]' \
     '--if-prompt[only send at a shell prompt]' \
     '--stop-if-gone[exit if a target disappears]' \
-    '(-d --dry-run)'{-d,--dry-run}'[print, send nothing]' \
     '(-q --quiet)'{-q,--quiet}'[errors only]' \
     '(-v --verbose)'{-v,--verbose}'[extra detail]' \
     '--log[append a timestamped log]:file:_files' \
@@ -56,6 +56,7 @@ _claude_waker() {
     '--no-color[disable colour]' \
     '--print-cmd[print the equivalent command line]' \
     '(-y --yes)'{-y,--yes}'[never prompt]' \
+    '--no-remember[do not save these choices]' \
     '(-c --config)'{-c,--config}'[alternate config file]:file:_files' \
     '--no-config[ignore the config file]' \
     '(-p --profile)'{-p,--profile}'[config profile]:profile:' \

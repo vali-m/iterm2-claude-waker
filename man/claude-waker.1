@@ -1,4 +1,4 @@
-.TH CLAUDE-WAKER 1 "2026-08-04" "claude-waker 0.1.2" "User Commands"
+.TH CLAUDE-WAKER 1 "2026-08-04" "claude-waker 0.2.0" "User Commands"
 .SH NAME
 claude\-waker \- keep Claude Code sessions in iTerm2 awake on a schedule
 .SH SYNOPSIS
@@ -13,9 +13,16 @@ input can be told to
 .B continue
 while you are away.
 .PP
-Run with no arguments on a terminal it presents an interactive menu. Given any
-flag or subcommand it runs non\-interactively, so it is equally at home in a
-script or a cron entry. The subcommand may appear before or after the flags.
+Run with no arguments on a terminal it lists the sessions currently open in
+iTerm2, asks which to wake, and then presents an interactive menu. There is no
+default target: it never guesses which session you meant. Given any flag or
+subcommand it runs non\-interactively, so it is equally at home in a script or a
+cron entry. The subcommand may appear before or after the flags.
+.PP
+The chosen target, message, count and interval are remembered, so a later bare
+invocation resumes where you left off. See
+.B REMEMBERING
+below.
 .PP
 It talks to iTerm2 through
 .BR osascript (1)
@@ -40,17 +47,28 @@ without sending anything.
 Install a "Claude Waker" entry into iTerm2's Scripts menu.
 .TP
 .B config
-Show the config file path and the effective settings.
+Show the config and state file paths and the effective settings.
+.TP
+.B forget
+Clear the remembered choices.
 .TP
 .BR version ", " help
 Print the version or the usage summary.
 .SH TARGETING
 .TP
 .BR \-m ", " \-\-match " " \fIPATTERN\fR
-Match sessions by name. Default
+Match sessions by name. Repeatable; a session is targeted when any pattern
+matches. There is no default \- with no target at all,
+.B claude\-waker
+asks you to pick from the sessions open in iTerm2.
+.IP
+A pick is stored as a derived substring rather than the exact title or the
+session id, because Claude Code rewrites the title while it works and ids die
+with the tab. Leading status glyphs and the trailing job name are stripped, so
+.RB \(lq "\(ct dev3" \(rq
+becomes
 .BR dev3 .
-Because the default mode is a substring match, this keeps working as Claude Code
-rewrites the session title.
+The derived pattern is shown and can be edited before it is used.
 .TP
 .BR \-M ", " \-\-match\-mode " " \fIMODE\fR
 One of
@@ -156,9 +174,6 @@ integration; without it no session appears to be at a prompt.
 Exit when a targeted session disappears.
 .SH OUTPUT
 .TP
-.BR \-d ", " \-\-dry\-run
-Print what would happen and send nothing. Waits are not actually slept.
-.TP
 .BR \-q ", " \-\-quiet
 Errors only.
 .TP
@@ -179,7 +194,10 @@ Force the live countdown on or off. It is on by default on a terminal.
 Print the equivalent command line and exit.
 .TP
 .BR \-y ", " \-\-yes
-Never prompt; skip the menu.
+Never prompt; skip the menu and the session picker.
+.TP
+.B \-\-no\-remember
+Do not save these choices for next time.
 .SH INTERACTIVE KEYS
 While the countdown is running:
 .BR s
@@ -192,6 +210,29 @@ and
 shift the next wake by five minutes,
 .BR q
 quit. Ctrl\-C exits cleanly and reports how many wakes were delivered.
+.SH REMEMBERING
+The target, message, count, interval and guards of the last run are written to
+.I $XDG_STATE_HOME/claude\-waker/state
+(or
+.I ~/.local/state/claude\-waker/state
+) and used as the defaults next time, so a bare
+.B claude\-waker
+resumes the previous setup.
+.PP
+A configuration file takes precedence over the remembered state, and flags take
+precedence over both, so a hand\-written config is never overwritten by whatever
+was last run. Command\-line values replace the remembered ones rather than
+adding to them:
+.B "\-m dev3"
+after a run against
+.B dev4
+targets only
+.BR dev3 .
+.PP
+.B "claude\-waker forget"
+clears the file;
+.B \-\-no\-remember
+runs without writing it.
 .SH CONFIGURATION
 .I $XDG_CONFIG_HOME/claude\-waker/config
 or
@@ -225,14 +266,20 @@ iTerm2 is not running.
 Nothing matched, or a guard stopped the run.
 .SH EXAMPLES
 .TP
-Reproduce the original loop, with the sleep bug fixed:
+Pick a session, then repeat that setup from then on:
+.B claude\-waker
+.TP
+Repeat whatever was last run:
 .B claude\-waker run
 .TP
 Every session that is not mid\-answer, indefinitely:
 .B claude\-waker run \-a \-\-if\-idle \-\-forever \-e 30m
 .TP
-Rehearse without sending:
-.B claude\-waker run \-m dev3 \-\-dry\-run
+Target either of two sessions:
+.B claude\-waker run \-m dev3 \-m dev4
+.TP
+See what would be targeted without sending:
+.B claude\-waker status \-m dev3
 .TP
 See what is out there:
 .B claude\-waker list
@@ -240,6 +287,9 @@ See what is out there:
 .TP
 .I ~/.config/claude-waker/config
 Configuration file.
+.TP
+.I ~/.local/state/claude-waker/state
+Remembered choices from the last run.
 .TP
 .I ~/Library/Application Support/iTerm2/Scripts/Claude Waker.py
 Installed by

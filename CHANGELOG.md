@@ -4,6 +4,45 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [0.2.0] — 2026-08-04
+
+Breaking: `--dry-run` is gone and `dev3` is no longer a default target.
+
+### Removed
+
+- **`-d` / `--dry-run`.** It was a second way to ask a question `status` and
+  `list` already answered, and its output ("would send", "would wait") read
+  enough like a real run to be genuinely confusing. Use
+  `claude-waker status` to see exactly what would be targeted without sending.
+- The **dry run** entry in the menu; "show equivalent command" is now option 6.
+
+### Changed
+
+- **No default target.** `dev3` was one person's tab name baked into the tool.
+  With no target specified, `claude-waker` now lists the sessions open in
+  iTerm2 and asks which to wake. Without a terminal to ask on — cron, a pipe,
+  `--yes` — a run with no target is an error rather than a guess.
+- **A pick becomes a pattern, not a name or an id.** Claude Code rewrites the
+  session title constantly and ids die with the tab, so the picker derives a
+  stable substring: `⠐ dev3` → `dev3`, `⠂ Refactor the parser (node)` →
+  `Refactor the parser`. The derived pattern is shown and can be edited.
+- **`-m` / `--match` is repeatable**; a session matches if any pattern does.
+
+### Added
+
+- **Choices are remembered.** Target, message, count, interval and guards are
+  saved to `${XDG_STATE_HOME:-~/.local/state}/claude-waker/state` and reused, so
+  a bare `claude-waker` resumes the previous setup.
+- `claude-waker forget` to clear the remembered choices, and `--no-remember` to
+  run without saving over them.
+- `claude-waker config` now shows the state path alongside the config path.
+
+### Fixed
+
+- Command-line values now **replace** remembered and configured ones instead of
+  being ORed with them. `-m dev3` after a run against `dev4` targeted both, and
+  `-t other` after a remembered message rotated between the two.
+
 ## [0.1.2] — 2026-08-04
 
 ### Fixed

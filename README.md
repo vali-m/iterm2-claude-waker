@@ -38,25 +38,46 @@ or just drop `bin/claude-waker` anywhere on your `PATH` — it's a single self-c
 
 ## Use it
 
-Run it with no arguments and you get a menu:
+Run it with no arguments and it asks which session to wake, listing what is actually
+open in iTerm2:
 
 ```
-╭─ claude-waker 0.1.0 ─────────────────────────────╮
+Pick the session(s) to wake
+
+   1) busy      ⠐ dev3
+   2) idle      ✳ dev4
+   3) prompt    ~ (-zsh)
+   4) busy      ⠂ Refactor the parser (node)
+
+  Enter numbers (2, 1,3, 1-4), a pattern, "all", or blank to cancel.
+> 1
+
+  will match any session whose name contains dev3
+  press Enter to accept, or type a different pattern: [dev3]
+```
+
+Then the menu:
+
+```
+╭─ claude-waker 0.2.0 ───────────────────────────╮
   Target     contains "dev3"  → 1 session
                ⠐ dev3
   Message    "continue"
   Repeats    16
   Interval   45m  ≈ 11h15m
   Guards     —
-╰──────────────────────────────────────────────────╯
+╰────────────────────────────────────────────────╯
 
  1) target   2) message   3) repeats   4) interval
- 5) guards   6) dry run   7) show equivalent command
+ 5) guards   6) show equivalent command
  s) start    q) quit
 ```
 
-Option `7` prints the exact command line for whatever is on screen, so you can graduate
+Option `6` prints the exact command line for whatever is on screen, so you can graduate
 from the menu to a script or a cron entry without reading the flag list.
+
+Next time it remembers, so a bare `claude-waker` comes straight back with the same
+target, message and interval ready to go.
 
 While it's running: `s` sends now, `p` pauses, `+`/`-` shift the next wake by 5 minutes,
 `q` quits. Ctrl-C is clean.
@@ -64,14 +85,15 @@ While it's running: `s` sends now, `p` pauses, `+`/`-` shift the next wake by 5 
 ### Common commands
 
 ```sh
-claude-waker                                  # menu
-claude-waker run                              # dev3, "continue", 16 times, every 45m
+claude-waker                                  # pick a session, then the menu
+claude-waker run                              # repeat whatever you last did
 claude-waker list                             # what sessions exist right now
 claude-waker status -m dev3                   # what would be targeted, send nothing
 claude-waker run -m dev3 -n 16 -e 45m         # explicit
+claude-waker run -m dev3 -m dev4              # either session
 claude-waker run -a --if-idle                 # every session that isn't mid-answer
 claude-waker run -m dev --forever -e 30m --jitter 10%
-claude-waker run -m dev3 --dry-run            # rehearse
+claude-waker forget                           # drop the remembered choices
 ```
 
 Anything you can do with flags you can do without them, and vice versa. The subcommand
@@ -79,12 +101,19 @@ can go before or after the flags.
 
 ## Targeting
 
-`--match` does a substring match on the session name, which is why the default `dev3`
-keeps working even though Claude Code rewrites the title constantly (`⠐ dev3`, `✳ dev3`).
+There is no default target. With nothing specified, `claude-waker` shows you the
+sessions currently open in iTerm2 and asks which to wake — so it never guesses, and
+never types into a session you did not choose.
+
+When you pick one it does **not** store the exact title or the session id. Claude Code
+rewrites the title constantly (`⠐ dev3` while working, `✳ dev3` while waiting) and ids
+die with the tab. It derives a stable substring instead — `⠐ dev3` becomes `dev3`,
+`⠂ Refactor the parser (node)` becomes `Refactor the parser` — shows you what it worked
+out, and lets you edit it before going ahead.
 
 | Flag | What it does |
 |---|---|
-| `-m, --match PATTERN` | substring of the session name (default `dev3`) |
+| `-m, --match PATTERN` | substring of the session name. Repeatable — any may match |
 | `-M, --match-mode MODE` | `contains` (default), `exact`, `glob`, `regex` |
 | `-i, --ignore-case` | case-insensitive |
 | `--session-id UUID` | one exact session; repeatable. Survives renames |
@@ -97,6 +126,15 @@ keeps working even though Claude Code rewrites the title constantly (`⠐ dev3`,
 
 `claude-waker list` shows ids with `-v`.
 
+Without a terminal to ask on — a cron entry, a pipe, or `--yes` — a run with no target
+is an error rather than a guess:
+
+```
+$ claude-waker run </dev/null
+claude-waker: no target chosen. Pass --match PATTERN, --session-id ID, --tty DEV or --all,
+claude-waker: or run claude-waker on a terminal to pick from the open sessions.
+```
+
 ## Message
 
 | Flag | What it does |
@@ -105,6 +143,10 @@ keeps working even though Claude Code rewrites the title constantly (`⠐ dev3`,
 | `--text-file FILE` | read the message from a file |
 | `--no-newline` | type it but don't press Enter |
 | `--esc-first` | send Escape first, to clear a half-typed line |
+
+There is no rehearsal mode. `claude-waker status` already shows exactly which sessions
+would be hit without sending anything, and `list` shows what is open — a separate
+dry-run flag was just a second way to ask the same question.
 
 The message is handed to AppleScript as an argument, never spliced into the script
 source, so quotes, backslashes and `$(...)` all arrive verbatim and nothing gets
@@ -139,6 +181,25 @@ terminal.
 without it every session looks like it isn't at a prompt.
 
 `--stop-if-gone` exits when a targeted session disappears instead of carrying on.
+
+## Remembering
+
+Whatever you last ran with — target, message, count, interval, guards — is written to
+
+```
+${XDG_STATE_HOME:-~/.local/state}/claude-waker/state
+```
+
+and used as the default next time, so a bare `claude-waker` picks up where you left off.
+
+```sh
+claude-waker forget              # drop it and be asked again
+claude-waker run --no-remember   # run without saving over it
+claude-waker config              # show both paths and what is in effect
+```
+
+A config file beats the remembered state, and flags beat both — so a hand-written config
+is never quietly overwritten by whatever you last happened to do.
 
 ## Config
 
@@ -192,6 +253,9 @@ with no delay — almost certainly left over from when the count was 8. `claude-
 sleeps between every send. If you actually want the old behaviour, `--legacy-timing`
 reproduces it exactly, and there's a test pinning both schedules.
 
+The hardcoded `dev3` is gone too — it was one person's tab name. You pick a session once
+and it is remembered, which gets you the same thing without the tool assuming anything.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -222,7 +286,7 @@ cp tldr/osx/claude-waker.md ~/.tldrc/tldr/pages/osx/    # tldr-c-client
 ## Development
 
 ```sh
-./test/run.sh              # 133 tests, no iTerm2 required
+./test/run.sh              # 174 tests, no iTerm2 required
 ./test/run.sh duration     # just the ones matching "duration"
 shellcheck bin/claude-waker
 ```

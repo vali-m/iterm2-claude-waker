@@ -44,6 +44,8 @@ setup_env() {
   export CW_TEST_SESSIONS="$(mk_sessions)"
   export CW_TEST_LOG="$SANDBOX/sends.log"
   export CW_TEST_SEND_MAP=""
+  export XDG_STATE_HOME="$SANDBOX/state"
+  export XDG_CONFIG_HOME="$SANDBOX/config"
   : >"$CW_TEST_LOG"
 }
 
@@ -248,19 +250,19 @@ text  = zzz
 EOF
 
   OPT_CONFIG="$cfg"; OPT_NO_CONFIG=0; OPT_PROFILE=""
-  OPT_MATCH=""; OPT_TEXT=""; OPT_COUNT=""; OPT_EVERY=""
+  MATCHES=(); OPT_TEXT=""; OPT_COUNT=""; OPT_EVERY=""
   load_config
-  it "config: reads match";              assert_eq "$OPT_MATCH" "staging"
+  it "config: reads match";              assert_eq "${MATCHES[0]:-}" "staging"
   it "config: strips quotes";            assert_eq "$OPT_TEXT" "keep going"
   it "config: reads count";              assert_eq "$OPT_COUNT" "4"
   it "config: ignores profile sections"; assert_eq "$OPT_EVERY" "10m"
 
   # A profile layers on top of the global keys rather than replacing them.
-  OPT_PROFILE="night"; OPT_EVERY=""; OPT_TEXT=""; OPT_MATCH=""
+  OPT_PROFILE="night"; OPT_EVERY=""; OPT_TEXT=""; MATCHES=()
   load_config
   it "config: profile overrides every";  assert_eq "$OPT_EVERY" "2h"
   it "config: profile overrides text";   assert_eq "$OPT_TEXT" "zzz"
-  it "config: profile inherits global";  assert_eq "$OPT_MATCH" "staging"
+  it "config: profile inherits global";  assert_eq "${MATCHES[0]:-}" "staging"
 
   it "config: never evaluates values"
   cat >"$cfg" <<'EOF'
@@ -308,27 +310,40 @@ test_list_and_status() {
 }
 
 test_schedule() {
-  local out sends waits
+  local out sends started elapsed
 
-  out=$(waker run -m dev3 -n 16 -e 45m --dry-run --no-countdown)
-  sends=$(printf '%s\n' "$out" | grep -c 'would send')
-  waits=$(printf '%s\n' "$out" | grep -c 'would wait')
-  it "schedule: 16 sends";                 assert_eq "$sends" "16"
-  it "schedule: 15 waits (no trailing)";   assert_eq "$waits" "15"
-  it "schedule: reports total";            assert_contains "$out" "16 wakes delivered"
+  # dry-run is gone, so the schedule shape is measured for real: N sends land in
+  # the fake osascript log and N-1 one-second waits show up as elapsed time.
+  : >"$CW_TEST_LOG"
+  started=$(date +%s)
+  waker run -m dev3 -n 5 -e 1s --no-countdown >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  sends=$(grep -c '^SEND' "$CW_TEST_LOG")
+  it "schedule: 5 sends";                  assert_eq "$sends" "5"
+  it "schedule: 4 waits (no trailing)"
+  if [ "$elapsed" -ge 3 ] && [ "$elapsed" -le 9 ]; then ok; else no "elapsed ${elapsed}s, expected ~4"; fi
 
-  out=$(waker run -m dev3 -n 16 -e 45m --legacy-timing --dry-run --no-countdown)
-  sends=$(printf '%s\n' "$out" | grep -c 'would send')
-  waits=$(printf '%s\n' "$out" | grep -c 'would wait')
-  it "legacy: still 16 sends";             assert_eq "$sends" "16"
-  it "legacy: only 7 waits (the old bug)"; assert_eq "$waits" "7"
+  : >"$CW_TEST_LOG"
+  started=$(date +%s)
+  waker run -m dev3 -n 5 -e 1s --legacy-timing --no-countdown >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  sends=$(grep -c '^SEND' "$CW_TEST_LOG")
+  it "legacy: still 5 sends";              assert_eq "$sends" "5"
+  it "legacy: only 1 wait (the old bug)"
+  if [ "$elapsed" -le 3 ]; then ok; else no "elapsed ${elapsed}s, expected ~1"; fi
 
-  out=$(waker run -m dev3 -n 1 -e 45m --dry-run --no-countdown)
-  waits=$(printf '%s\n' "$out" | grep -c 'would wait')
-  it "schedule: count=1 never waits";      assert_eq "$waits" "0"
+  : >"$CW_TEST_LOG"
+  started=$(date +%s)
+  waker run -m dev3 -n 1 -e 45m --no-countdown >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  it "schedule: count=1 never waits"
+  if [ "$elapsed" -le 2 ]; then ok; else no "elapsed ${elapsed}s, expected 0"; fi
 
-  out=$(waker run -m dev3 -n 3 -e 30m --dry-run --no-countdown --delay 5m)
+  out=$(waker run -m dev3 -n 1 -e 1s --no-countdown --delay 1s)
   it "schedule: --delay waits first";      assert_contains "$out" "First send at"
+
+  it "schedule: --dry-run is gone";        assert_exit 2 waker run -m dev3 --dry-run
+  it "schedule: -d is gone";               assert_exit 2 waker run -m dev3 -d
 }
 
 test_sending() {
@@ -409,7 +424,10 @@ test_cli_surface() {
 
   out=$(waker --help)
   it "cli: --help lists commands";   assert_contains "$out" "install-plugin"
-  it "cli: --help shows defaults";   assert_contains "$out" "default: dev3"
+  it "cli: --help drops the dev3 default"
+  assert_not_contains "$out" "default: dev3"
+  it "cli: --help explains picking"; assert_contains "$out" "asks you to pick"
+  it "cli: --help documents forget"; assert_contains "$out" "forget"
 
   it "cli: unknown flag exits 2";   assert_exit 2 waker --bogus-flag
   it "cli: bad match-mode exits 2"; assert_exit 2 waker run -M sideways
@@ -542,6 +560,115 @@ test_install_plugin() {
   rm -rf "$SANDBOX/__pycache__"
 }
 
+test_stable_pattern() {
+  # shellcheck disable=SC1090
+  CLAUDE_WAKER_LIB_ONLY=1 . "$WAKER"
+
+  # Claude Code rewrites the title constantly, so a pick has to become a pattern
+  # that outlives the exact name that was on screen.
+  it "pattern: strips the busy spinner glyph"
+  assert_eq "$(stable_pattern_from_name "⠐ dev3")" "dev3"
+  it "pattern: strips the idle marker"
+  assert_eq "$(stable_pattern_from_name "✳ dev4")" "dev4"
+  it "pattern: strips the trailing job name"
+  assert_eq "$(stable_pattern_from_name "⠂ Some long task (node)")" "Some long task"
+  it "pattern: keeps a plain name"
+  assert_eq "$(stable_pattern_from_name "dev3")" "dev3"
+  it "pattern: keeps a leading real word"
+  assert_eq "$(stable_pattern_from_name "bash (sleep)")" "bash"
+  it "pattern: trims surrounding space"
+  assert_eq "$(stable_pattern_from_name "  ⠋  spaced  ")" "spaced"
+  it "pattern: never returns empty"
+  assert_eq "$(stable_pattern_from_name "⠋")" "⠋"
+
+  # Both title states of the same session must derive to the same pattern.
+  it "pattern: busy and idle titles agree"
+  assert_eq "$(stable_pattern_from_name "⠐ dev3")" "$(stable_pattern_from_name "✳ dev3")"
+}
+
+test_multi_match() {
+  local out
+  out=$(waker status -m dev3 -m dev4)
+  it "multi-match: either pattern matches"; assert_contains "$out" "Matches (2)"
+  it "multi-match: described as an or";     assert_contains "$out" 'or'
+
+  out=$(waker run -m dev3 -m dev4 -n 1 --no-countdown --print-cmd)
+  it "multi-match: --print-cmd keeps both"; assert_contains "$out" "-m dev3 -m dev4"
+
+  : >"$CW_TEST_LOG"
+  waker run -m dev3 -m zsh -n 1 --no-countdown >/dev/null
+  it "multi-match: sends to both"; assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-1 id-3"
+}
+
+test_no_default_target() {
+  # dev3 is no longer baked in as a default.
+  it "no-default: help does not promise dev3"
+  assert_not_contains "$(waker --help)" "default: dev3"
+
+  it "no-default: non-interactive run without a target exits 2"
+  assert_exit 2 waker run --no-remember
+
+  local out
+  out=$(waker run --no-remember 2>&1)
+  it "no-default: explains how to choose";  assert_contains "$out" "no target chosen"
+  it "no-default: names the flags";         assert_contains "$out" "--match"
+  it "no-default: points at the picker";    assert_contains "$out" "pick from the open sessions"
+
+  it "no-default: nothing was sent";        assert_eq "$(wc -l <"$CW_TEST_LOG" | tr -d ' ')" "0"
+
+  it "no-default: status with no target is not an error"
+  assert_exit 0 waker status
+  out=$(waker status)
+  it "no-default: status says nothing chosen"; assert_contains "$out" "nothing chosen yet"
+}
+
+test_remember() {
+  local home="$SANDBOX/rhome" state
+  mkdir -p "$home"
+  state="$home/state/claude-waker/state"
+
+  rwaker() { HOME="$home" XDG_STATE_HOME="$home/state" "$WAKER" --no-color "$@" 2>&1; }
+
+  it "remember: a run writes the state file"
+  rwaker run -m dev4 -t "keep going" -n 2 -e 1s --no-countdown >/dev/null
+  [ -f "$state" ] && ok || no "no state at $state"
+
+  it "remember: stores the target";   assert_contains "$(cat "$state")" "match=dev4"
+  it "remember: stores the message";  assert_contains "$(cat "$state")" "text=keep going"
+  it "remember: stores the count";    assert_contains "$(cat "$state")" "count=2"
+  it "remember: stores the interval"; assert_contains "$(cat "$state")" "every=1s"
+
+  it "remember: a later bare run reuses it"
+  : >"$CW_TEST_LOG"
+  rwaker run --no-countdown >/dev/null 2>&1
+  assert_contains "$(cat "$CW_TEST_LOG")" "msg=keep going"
+
+  it "remember: reused run targets the remembered session"
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-2"
+
+  it "remember: flags still win over it"
+  : >"$CW_TEST_LOG"
+  rwaker run -m dev3 -t other -n 1 -e 1s --no-countdown >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "msg=other"
+
+  it "remember: --no-remember does not overwrite"
+  rwaker run -m zsh -t untracked -n 1 --no-remember --no-countdown >/dev/null 2>&1
+  assert_not_contains "$(cat "$state")" "untracked"
+
+  it "remember: config shows the state path"
+  assert_contains "$(rwaker config)" "claude-waker/state"
+
+  it "remember: forget clears it"
+  rwaker forget >/dev/null
+  [ -f "$state" ] && no "state still present" || ok
+
+  it "remember: forget on a clean slate is fine"
+  assert_contains "$(rwaker forget)" "Nothing remembered"
+
+  it "remember: after forget a bare run has no target again"
+  assert_exit 2 env HOME="$home" XDG_STATE_HOME="$home/state" "$WAKER" --no-color run
+}
+
 test_flag_order() {
   local out
   out=$(waker list)
@@ -555,7 +682,7 @@ test_flag_order() {
   waker run -m dev3 -n 1 --no-countdown -t status >/dev/null
   it "order: '-t status' stays a message";   assert_contains "$(cat "$CW_TEST_LOG")" "msg=status"
 
-  out=$(waker run -m list -n 1 --dry-run --no-countdown --print-cmd)
+  out=$(waker run -m list -n 1 --no-countdown --print-cmd)
   it "order: '-m list' stays a pattern";     assert_contains "$out" "-m list"
 }
 
@@ -566,6 +693,7 @@ printf 'bash %s\n' "${BASH_VERSION}"
 
 run_test "durations"        test_durations
 run_test "jitter"           test_jitter
+run_test "stable pattern"   test_stable_pattern
 run_test "matching"         test_matching
 run_test "config"           test_config
 run_test "list and status"  test_list_and_status
@@ -573,6 +701,9 @@ run_test "schedule"         test_schedule
 run_test "sending"          test_sending
 run_test "quoting"          test_quoting
 run_test "cli surface"      test_cli_surface
+run_test "multi match"      test_multi_match
+run_test "no default target" test_no_default_target
+run_test "remember"         test_remember
 run_test "no hangs"         test_no_hangs
 run_test "install plugin"   test_install_plugin
 run_test "flag order"       test_flag_order
