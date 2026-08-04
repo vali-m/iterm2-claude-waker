@@ -21,6 +21,13 @@ No dependencies. One bash script and `osascript`. macOS only, because iTerm2 is.
 brew install vali-m/tap/claude-waker
 ```
 
+Homebrew is rolling out [tap trust](https://docs.brew.sh/Tap-Trust) for third-party
+taps. If it refuses to load the formula, trust the tap once:
+
+```sh
+brew trust --tap vali-m/tap
+```
+
 or
 
 ```sh

@@ -30,6 +30,13 @@ homebrew-tap/
 That name is what makes `brew install vali-m/tap/claude-waker` work — Homebrew expands
 `vali-m/tap` to `github.com/vali-m/homebrew-tap`.
 
+The tap now exists and carries `claude-waker`. What follows is for reference or a
+rebuild.
+
+Homebrew is rolling out [tap trust](https://docs.brew.sh/Tap-Trust); a third-party tap
+reads as `Untrusted` in `brew tap-info` until the user runs `brew trust --tap vali-m/tap`.
+Mention that anywhere the install command is documented.
+
 ### First-time setup
 
 ```sh
