@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Test double for ps. claude-waker only ever asks it one question — "which tty
+# am I on?" — so answering that is the whole job.
+#
+#   CW_TEST_SELF_TTY  tty to report (default "??", i.e. not on a terminal)
+
+set -u
+
+printf '%s\n' "${CW_TEST_SELF_TTY:-??}"

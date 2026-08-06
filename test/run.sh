@@ -39,8 +39,10 @@ setup_env() {
   BIN="$SANDBOX/bin"
   mkdir -p "$BIN"
   ln -sf "$TEST_DIR/fake-osascript" "$BIN/osascript"
-  chmod +x "$TEST_DIR/fake-osascript"
+  ln -sf "$TEST_DIR/fake-ps" "$BIN/ps"
+  chmod +x "$TEST_DIR/fake-osascript" "$TEST_DIR/fake-ps"
   export PATH="$BIN:$PATH"
+  export CW_TEST_SELF_TTY="??"
   export CW_TEST_SESSIONS="$(mk_sessions)"
   export CW_TEST_LOG="$SANDBOX/sends.log"
   export CW_TEST_SEND_MAP=""
@@ -699,6 +701,115 @@ test_stale_target() {
   export CW_TEST_SESSIONS="$(mk_sessions)"
 }
 
+# The session claude-waker itself runs in is never offered and never targeted:
+# writing into it types the message at the waker, not at Claude.
+test_self_session() {
+  local out
+  export CW_TEST_SELF_TTY="ttys001"     # "⠐ dev3", the first fake session
+
+  out=$(printf 'q\n' | waker menu)
+  it "self: not offered in the picker";  assert_not_contains "$out" "⠐ dev3"
+  it "self: the others still are";       assert_contains "$out" "✳ dev4"
+
+  it "self: --all skips it"
+  : >"$CW_TEST_LOG"
+  waker run --all -n 1 -e 1s --no-countdown --no-remember >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-2 id-3 id-4"
+
+  it "self: a pattern that would match it skips it"
+  : >"$CW_TEST_LOG"
+  export CW_TEST_SELF_TTY="ttys005"     # "DEV3-upper"
+  waker run -i -m dev3 -n 1 -e 1s --no-countdown --no-remember >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-1"
+
+  # Naming it outright is a deliberate act, so it is honoured.
+  it "self: --tty targets it anyway"
+  : >"$CW_TEST_LOG"
+  export CW_TEST_SELF_TTY="ttys001"
+  waker run --tty /dev/ttys001 -n 1 -e 1s --no-countdown --no-remember >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-1"
+
+  it "self: --session-id targets it anyway"
+  : >"$CW_TEST_LOG"
+  waker run --session-id id-1 -n 1 -e 1s --no-countdown --no-remember >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-1"
+
+  it "self: list still shows it, marked"
+  assert_contains "$(waker list)" "(this session"
+
+  it "self: off a terminal nothing is excluded"
+  : >"$CW_TEST_LOG"
+  export CW_TEST_SELF_TTY="??"
+  waker run --all -n 1 -e 1s --no-countdown --no-remember >/dev/null
+  assert_contains "$(cat "$CW_TEST_LOG")" "ids=id-1 id-2 id-3 id-4"
+
+  it "self: when it is the only session, say so"
+  export CW_TEST_SELF_TTY="ttys001"
+  export CW_TEST_SESSIONS="$(printf '%s' \
+    "id-1${FS}⠐ dev3${FS}/dev/ttys001${FS}true${FS}false${RS}")"
+  out=$(printf 'q\n' | waker menu)
+  assert_contains "$out" "only session open is this one"
+
+  export CW_TEST_SESSIONS="$(mk_sessions)"
+  export CW_TEST_SELF_TTY="??"
+}
+
+test_picker() {
+  local out
+  # 1) ✳ dev4   2) ~ (-zsh)   3) DEV3-upper   -- ⠐ dev3 is this session
+  export CW_TEST_SELF_TTY="ttys001"
+
+  out=$(printf '1\n\nq\n' | waker menu)
+  it "picker: a number picks the session shown at that number"
+  assert_contains "$out" 'contains "dev4"'
+
+  # Typing numbers at the confirm prompt means "those ones after all" -- it
+  # used to be taken as a literal pattern named "2,3".
+  out=$(printf '1\n2,3\nq\n' | waker menu)
+  it "picker: numbers at the confirm prompt re-pick"
+  assert_contains "$out" 'contains "(-zsh)" or "DEV3-upper"'
+  it "picker: and are not taken as a pattern"
+  assert_not_contains "$out" 'contains "2,3"'
+
+  out=$(printf '1\nall\nq\n' | waker menu)
+  it "picker: \"all\" at the confirm prompt works too"
+  assert_contains "$out" "all sessions"
+
+  out=$(printf '1\ndev\nq\n' | waker menu)
+  it "picker: a real pattern at the confirm prompt is still a pattern"
+  assert_contains "$out" 'contains "dev"'
+
+  out=$(printf '1-3\nq\n' | waker menu)
+  it "picker: a range picks each session in it"
+  assert_contains "$out" 'contains "dev4" or "(-zsh)" or "DEV3-upper"'
+
+  out=$(printf '1-99\nq\n' | waker menu)
+  it "picker: a range past the end stops at the end"
+  assert_contains "$out" 'contains "dev4" or "(-zsh)" or "DEV3-upper"'
+
+  out=$(printf '1,1\n\nq\n' | waker menu)
+  it "picker: the same session twice is one pattern"
+  assert_contains "$out" 'contains "dev4"'
+  it "picker: not two"
+  assert_not_contains "$out" 'or "dev4"'
+
+  out=$(printf '9\n1\n\nq\n' | waker menu)
+  it "picker: an out-of-range number is reported"
+  assert_contains "$out" "out-of-range selection: 9"
+  it "picker: and it asks again rather than giving up"
+  assert_contains "$out" 'contains "dev4"'
+
+  out=$(printf 'my-tab\nq\n' | waker menu)
+  it "picker: text is a pattern"; assert_contains "$out" 'contains "my-tab"'
+
+  out=$(printf 'all\nq\n' | waker menu)
+  it "picker: \"all\" targets everything";  assert_contains "$out" "all sessions"
+  it "picker: without also carrying a pattern"
+  assert_not_contains "$(printf 'all\n6\n\nq\n' | waker menu)" '-m all'
+
+  export CW_TEST_SELF_TTY="??"
+}
+
 test_flag_order() {
   local out
   out=$(waker list)
@@ -735,6 +846,8 @@ run_test "multi match"      test_multi_match
 run_test "no default target" test_no_default_target
 run_test "remember"         test_remember
 run_test "stale target"     test_stale_target
+run_test "self session"     test_self_session
+run_test "picker"           test_picker
 run_test "no hangs"         test_no_hangs
 run_test "install plugin"   test_install_plugin
 run_test "flag order"       test_flag_order

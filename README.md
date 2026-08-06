@@ -53,13 +53,17 @@ Pick the session(s) to wake
 > 1
 
   will match any session whose name contains dev3
-  press Enter to accept, or type a different pattern: [dev3]
+  Enter to accept, or type a pattern or other numbers: [dev3]
 ```
+
+The session you launched `claude-waker` from is not on the list, and no pattern will
+ever match it: writing into it would type the message at the waker rather than at
+Claude. `--session-id` or `--tty` still target it if you really mean to.
 
 Then the menu:
 
 ```
-╭─ claude-waker 0.2.0 ───────────────────────────╮
+╭─ claude-waker 0.2.2 ───────────────────────────╮
   Target     contains "dev3"  → 1 session
                ⠐ dev3
   Message    "continue"
@@ -289,7 +293,7 @@ cp tldr/osx/claude-waker.md ~/.tldrc/tldr/pages/osx/    # tldr-c-client
 ## Development
 
 ```sh
-./test/run.sh              # 178 tests, no iTerm2 required
+./test/run.sh              # 201 tests, no iTerm2 required
 ./test/run.sh duration     # just the ones matching "duration"
 shellcheck bin/claude-waker
 ```

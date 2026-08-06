@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [0.2.2] — 2026-08-06
+
+### Fixed
+
+- **The waker's own session is no longer a target.** It appeared in the picker
+  as an option, and — worse — a pattern derived from a sibling tab usually
+  matched it too, so `continue` was typed at the waker instead of at Claude.
+  It is now left out of the picker and skipped by patterns and `--all`.
+  `--session-id` and `--tty` still target it, since naming it is deliberate.
+  `list` still shows it, marked.
+- **Numbers at the confirm prompt pick again instead of becoming a pattern.**
+  After choosing one session the prompt offers to edit the derived pattern;
+  typing `2,5` there set the literal pattern `2,5` rather than selecting those
+  two sessions. Numbers and `all` are now re-read as a selection.
+- An out-of-range pick no longer silently leaves the picker with nothing
+  chosen; it says so and asks again.
+- Picking the same session twice ( `1,1`, or overlapping ranges) produced
+  duplicate patterns. A range past the end of the list now stops at the end.
+
 ## [0.2.1] — 2026-08-04
 
 ### Fixed
