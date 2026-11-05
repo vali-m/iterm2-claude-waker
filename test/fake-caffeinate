@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test double for caffeinate. Records its pid and arguments, then stays alive
+# the way the real one does, so the tests can check it is started and released.
+#
+#   CW_TEST_CAFFEINATE_LOG  file to append "<pid> <args>" to
+
+set -u
+
+printf '%s %s\n' "$$" "$*" >>"${CW_TEST_CAFFEINATE_LOG:-/dev/null}"
+exec sleep 60

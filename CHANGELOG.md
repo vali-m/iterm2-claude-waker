@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Runs keep the Mac awake.** A run now holds a `caffeinate` assertion until it
+  ends, so idle sleep can't stall it overnight. The display can still turn off.
+  Use `--no-keep-awake` or `keep_awake = false` to opt out.
+
 ## [0.2.2] — 2026-08-06
 
 ### Fixed

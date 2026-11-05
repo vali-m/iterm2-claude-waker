@@ -48,6 +48,7 @@ _claude_waker() {
     '--if-idle[skip sessions streaming output]' \
     '--if-prompt[only send at a shell prompt]' \
     '--stop-if-gone[exit if a target disappears]' \
+    '(--keep-awake --no-keep-awake)'{--keep-awake,--no-keep-awake}'[keep the Mac awake during the run]' \
     '(-q --quiet)'{-q,--quiet}'[errors only]' \
     '(-v --verbose)'{-v,--verbose}'[extra detail]' \
     '--log[append a timestamped log]:file:_files' \

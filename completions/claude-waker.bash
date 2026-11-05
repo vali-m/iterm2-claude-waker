@@ -12,7 +12,7 @@ _claude_waker() {
         --first --require-match --max-targets --text --message --text-file
         --no-newline --newline --esc-first --count --forever --every --interval
         --jitter --delay --start-in --at --until --deadline --legacy-timing
-        --if-idle --if-prompt --stop-if-gone --quiet --verbose --log
+        --if-idle --if-prompt --stop-if-gone --keep-awake --no-keep-awake --quiet --verbose --log
         --notify --countdown --no-countdown --no-color --color --print-cmd
         --yes --no-remember --menu --config --no-config --profile --help --version"
 

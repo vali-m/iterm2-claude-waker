@@ -40,11 +40,13 @@ setup_env() {
   mkdir -p "$BIN"
   ln -sf "$TEST_DIR/fake-osascript" "$BIN/osascript"
   ln -sf "$TEST_DIR/fake-ps" "$BIN/ps"
-  chmod +x "$TEST_DIR/fake-osascript" "$TEST_DIR/fake-ps"
+  ln -sf "$TEST_DIR/fake-caffeinate" "$BIN/caffeinate"
+  chmod +x "$TEST_DIR/fake-osascript" "$TEST_DIR/fake-ps" "$TEST_DIR/fake-caffeinate"
   export PATH="$BIN:$PATH"
   export CW_TEST_SELF_TTY="??"
   export CW_TEST_SESSIONS="$(mk_sessions)"
   export CW_TEST_LOG="$SANDBOX/sends.log"
+  export CW_TEST_CAFFEINATE_LOG="$SANDBOX/caffeinate.log"
   export CW_TEST_SEND_MAP=""
   export XDG_STATE_HOME="$SANDBOX/state"
   export XDG_CONFIG_HOME="$SANDBOX/config"
@@ -810,6 +812,60 @@ test_picker() {
   export CW_TEST_SELF_TTY="??"
 }
 
+test_keep_awake() {
+  local log="$CW_TEST_CAFFEINATE_LOG" out pid waker_pid cfg i
+
+  : >"$log"
+  waker run -m dev3 -n 2 -e 1s --no-countdown >/dev/null
+  it "keep awake: on by default, once per run"
+  assert_eq "$(grep -c . "$log")" "1"
+  it "keep awake: holds idle and system sleep"
+  assert_contains "$(cat "$log")" "-i -s -w "
+  it "keep awake: leaves the display alone"
+  case " $(cut -d' ' -f2- "$log") " in *" -d "*) no "display assertion taken" ;; *) ok ;; esac
+  pid=$(cut -d' ' -f1 "$log")
+  it "keep awake: released when the run ends"
+  kill -0 "$pid" 2>/dev/null && no "caffeinate $pid still running" || ok
+
+  : >"$log"
+  waker run -m dev3 -n 1 --no-keep-awake --no-countdown >/dev/null
+  it "keep awake: --no-keep-awake skips it"
+  assert_eq "$(grep -c . "$log")" "0"
+
+  cfg="$SANDBOX/keep-awake.conf"
+  printf 'keep_awake = false\n' >"$cfg"
+  : >"$log"
+  "$WAKER" --no-color -c "$cfg" run -m dev3 -n 1 --no-countdown >/dev/null 2>&1
+  it "keep awake: config can turn it off"
+  assert_eq "$(grep -c . "$log")" "0"
+  "$WAKER" --no-color -c "$cfg" run -m dev3 -n 1 --keep-awake --no-countdown >/dev/null 2>&1
+  it "keep awake: a flag beats the config"
+  assert_eq "$(grep -c . "$log")" "1"
+
+  : >"$log"
+  waker list >/dev/null
+  it "keep awake: only a run takes it"
+  assert_eq "$(grep -c . "$log")" "0"
+
+  out=$(waker run -m dev3 --no-keep-awake --print-cmd)
+  it "keep awake: --print-cmd keeps the opt-out"
+  assert_contains "$out" "--no-keep-awake"
+
+  : >"$log"
+  "$WAKER" --no-config --no-color run -m dev3 -n 3 -e 30s --countdown \
+    </dev/null >/dev/null 2>&1 &
+  waker_pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$log" ] && break
+    sleep 0.2
+  done
+  pid=$(cut -d' ' -f1 "$log")
+  kill -TERM "$waker_pid" 2>/dev/null
+  wait "$waker_pid" 2>/dev/null
+  it "keep awake: released on SIGTERM"
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then ok; else no "caffeinate '$pid' not released"; fi
+}
+
 test_flag_order() {
   local out
   out=$(waker list)
@@ -850,6 +906,7 @@ run_test "self session"     test_self_session
 run_test "picker"           test_picker
 run_test "no hangs"         test_no_hangs
 run_test "install plugin"   test_install_plugin
+run_test "keep awake"       test_keep_awake
 run_test "flag order"       test_flag_order
 run_test "iterm absent"     test_iterm_absent
 

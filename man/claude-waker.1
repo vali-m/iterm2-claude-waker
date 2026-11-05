@@ -184,6 +184,16 @@ integration; without it no session appears to be at a prompt.
 .TP
 .B \-\-stop\-if\-gone
 Exit when a targeted session disappears.
+.SH POWER
+A run keeps the Mac awake until it ends, because a sleeping Mac sends nothing.
+The display can still turn off. With the lid closed this needs AC power; on
+battery the Mac sleeps anyway.
+.TP
+.BR \-\-keep\-awake ", " \-\-no\-keep\-awake
+Hold or skip the sleep assertion, taken with
+.BR caffeinate (8).
+On by default. The config key is
+.BR keep_awake .
 .SH OUTPUT
 .TP
 .BR \-q ", " \-\-quiet

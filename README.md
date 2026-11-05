@@ -186,6 +186,17 @@ without it every session looks like it isn't at a prompt.
 
 `--stop-if-gone` exits when a targeted session disappears instead of carrying on.
 
+## Staying awake
+
+A sleeping Mac sends nothing, so a run keeps it awake until the run ends. This uses
+`caffeinate`, which ships with macOS, and it stops when the run stops, even after a
+`kill -9`. The display can still turn off.
+
+With the lid closed this needs AC power. On battery the Mac sleeps anyway.
+
+`--no-keep-awake` turns this off for one run, and `keep_awake = false` in the config
+turns it off for good.
+
 ## Remembering
 
 Whatever you last ran with — target, message, count, interval, guards — is written to

@@ -41,6 +41,7 @@ OPT_QUIET=0
 OPT_VERBOSE=0
 OPT_LOG=""
 OPT_NOTIFY=0
+OPT_KEEP_AWAKE=1
 OPT_COUNTDOWN=-1        # -1 = auto (on when TTY)
 OPT_COLOR=-1            # -1 = auto (on when TTY)
 OPT_LEGACY=0
@@ -66,6 +67,7 @@ SAW_ARGS=0
 # Runtime state
 SENT_TOTAL=0
 CURSOR_HIDDEN=0
+KEEP_AWAKE_PID=""
 
 # Field/record separators used to talk to AppleScript. Chosen because they
 # cannot appear in an iTerm2 session name.
@@ -125,7 +127,33 @@ APPLESCRIPT
 hide_cursor() { [ -t 1 ] && { printf '\033[?25l'; CURSOR_HIDDEN=1; }; return 0; }
 show_cursor() { [ "$CURSOR_HIDDEN" -eq 1 ] && { printf '\033[?25h'; CURSOR_HIDDEN=0; }; return 0; }
 
+# A run spends nearly all its time waiting, and a sleeping Mac sends nothing.
+# -i stops idle sleep. -s also covers sleep that isn't idle, such as clamshell
+# sleep, but only on AC power. -d is left out on purpose: the display may turn
+# off overnight. -w ties the assertion to this process, so a kill -9 cannot
+# leave the Mac awake.
+start_keep_awake() {
+  [ "$OPT_KEEP_AWAKE" -eq 1 ] || return 0
+  [ -z "$KEEP_AWAKE_PID" ] || return 0
+  if ! command -v caffeinate >/dev/null 2>&1; then
+    warn "caffeinate not found; the Mac may sleep during this run"
+    return 0
+  fi
+  caffeinate -i -s -w "$$" >/dev/null 2>&1 &
+  KEEP_AWAKE_PID=$!
+  vsay "Keeping the Mac awake until this run ends."
+}
+
+stop_keep_awake() {
+  [ -n "$KEEP_AWAKE_PID" ] || return 0
+  kill "$KEEP_AWAKE_PID" 2>/dev/null
+  wait "$KEEP_AWAKE_PID" 2>/dev/null
+  KEEP_AWAKE_PID=""
+  return 0
+}
+
 cleanup() {
+  stop_keep_awake
   show_cursor
   [ -t 1 ] && printf '\r\033[K'
   return 0
@@ -631,6 +659,7 @@ apply_config_kv() {
     if_idle)        OPT_IF_IDLE=$(bool01 "$val") ;;
     if_prompt)      OPT_IF_PROMPT=$(bool01 "$val") ;;
     notify)         OPT_NOTIFY=$(bool01 "$val") ;;
+    keep_awake)     OPT_KEEP_AWAKE=$(bool01 "$val") ;;
     countdown)      OPT_COUNTDOWN=$(bool01 "$val") ;;
     color)          OPT_COLOR=$(bool01 "$val") ;;
     legacy_timing)  OPT_LEGACY=$(bool01 "$val") ;;
@@ -755,6 +784,11 @@ ${C_BOLD}GUARDS${C_RESET}
                             (requires iTerm2 shell integration)
       --stop-if-gone        exit if a targeted session disappears
 
+${C_BOLD}POWER${C_RESET}
+      --no-keep-awake       let the Mac sleep during the run (by default it
+                            stays awake until the run ends; the display can
+                            still turn off)
+
 ${C_BOLD}OUTPUT${C_RESET}
   -q, --quiet               errors only
   -v, --verbose             extra detail
@@ -840,6 +874,9 @@ parse_args() {
       --if-idle)         OPT_IF_IDLE=1; shift ;;
       --if-prompt)       OPT_IF_PROMPT=1; shift ;;
       --stop-if-gone)    OPT_STOP_IF_GONE=1; shift ;;
+
+      --keep-awake)      OPT_KEEP_AWAKE=1; shift ;;
+      --no-keep-awake)   OPT_KEEP_AWAKE=0; shift ;;
 
       -q|--quiet)        OPT_QUIET=1; shift ;;
       -v|--verbose)      OPT_VERBOSE=1; shift ;;
@@ -1026,6 +1063,7 @@ equivalent_cmd() {
   [ "$OPT_IF_IDLE" -eq 1 ] && out="$out --if-idle"
   [ "$OPT_IF_PROMPT" -eq 1 ] && out="$out --if-prompt"
   [ "$OPT_STOP_IF_GONE" -eq 1 ] && out="$out --stop-if-gone"
+  [ "$OPT_KEEP_AWAKE" -eq 0 ] && out="$out --no-keep-awake"
   [ "$OPT_NOTIFY" -eq 1 ] && out="$out --notify"
   [ -n "$OPT_LOG" ] && out="$out --log $(shq "$OPT_LOG")"
   printf '%s\n' "$out"
@@ -1117,6 +1155,7 @@ cmd_config() {
   say "  count         $OPT_COUNT"
   say "  every         $OPT_EVERY"
   say "  if_idle       $OPT_IF_IDLE"
+  say "  keep_awake    $OPT_KEEP_AWAKE"
   say "  legacy_timing $OPT_LEGACY"
   if [ ! -r "$f" ]; then
     say ""
@@ -1562,6 +1601,7 @@ run_loop() {
   local i msg wait_secs next_label rc
 
   save_state
+  start_keep_awake
 
   if [ "$DELAY_SECS" -gt 0 ]; then
     next_label=$(date -v "+${DELAY_SECS}S" '+%H:%M:%S' 2>/dev/null || printf '?')
