@@ -22,9 +22,9 @@ _claude_waker() {
     --text-file|--log|-c|--config)
       COMPREPLY=( $(compgen -f -- "$cur") ); return 0 ;;
     -e|--every|--interval|--delay|--start-in|--deadline)
-      COMPREPLY=( $(compgen -W "30s 5m 15m 30m 45m 1h 1h30m 2h" -- "$cur") ); return 0 ;;
+      COMPREPLY=( $(compgen -W "30s 5m 15m 30m 45m 1h 1h30m 2h 5h" -- "$cur") ); return 0 ;;
     -n|--count)
-      COMPREPLY=( $(compgen -W "1 4 8 16 32 0" -- "$cur") ); return 0 ;;
+      COMPREPLY=( $(compgen -W "1 4 5 8 16 32 0" -- "$cur") ); return 0 ;;
     --jitter)
       COMPREPLY=( $(compgen -W "5% 10% 25% 1m 5m" -- "$cur") ); return 0 ;;
     -m|--match|-t|--text|--message|--exclude|--session-id|--tty|-p|--profile|--max-targets|--at|--until)

@@ -67,8 +67,8 @@ Then the menu:
   Target     contains "dev3"  → 1 session
                ⠐ dev3
   Message    "continue"
-  Repeats    16
-  Interval   45m  ≈ 11h15m
+  Repeats    5
+  Interval   5h  ≈ 20h
   Guards     —
 ╰────────────────────────────────────────────────╯
 
@@ -160,8 +160,8 @@ evaluated on the way.
 
 | Flag | What it does |
 |---|---|
-| `-n, --count N` | how many sends (default 16). `0` or `--forever` for no limit |
-| `-e, --every DUR` | gap between sends (default `45m`) |
+| `-n, --count N` | how many sends (default 5). `0` or `--forever` for no limit |
+| `-e, --every DUR` | gap between sends (default `5h`) |
 | `--jitter DUR\|N%` | randomise each gap by ± that much |
 | `--delay DUR` | wait before the first send |
 | `--at HH:MM` | first send at a wall-clock time |

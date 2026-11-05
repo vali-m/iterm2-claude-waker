@@ -12,6 +12,12 @@ versioning is [semver](https://semver.org/).
   ends, so idle sleep can't stall it overnight. The display can still turn off.
   Use `--no-keep-awake` or `keep_awake = false` to opt out.
 
+### Changed
+
+- **New defaults: 5 sends, 5 hours apart** (was 16 sends, 45 minutes apart).
+  Choices already remembered from an earlier run still take precedence; use
+  `claude-waker forget` to pick up the new defaults.
+
 ## [0.2.2] — 2026-08-06
 
 ### Fixed

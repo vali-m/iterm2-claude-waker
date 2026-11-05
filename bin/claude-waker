@@ -11,12 +11,12 @@ CW_VERSION="0.2.2"
 CW_PROG="${0##*/}"
 
 # ---------------------------------------------------------------------------
-# Defaults (these reproduce the original shell loop)
+# Defaults
 # ---------------------------------------------------------------------------
 
 DEF_TEXT="continue"
-DEF_COUNT=16
-DEF_EVERY="45m"
+DEF_COUNT=5
+DEF_EVERY="5h"
 
 OPT_MATCH_MODE="contains"
 OPT_IGNORE_CASE=0
